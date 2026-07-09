@@ -8968,6 +8968,7 @@
       "description": "Initial collaboration mode to use when the TUI starts.",
       "enum": [
         "plan",
+        "orchestrated",
         "default"
       ],
       "type": "string"
@@ -13294,6 +13295,26 @@
           "properties": {
             "method": {
               "enum": [
+                "turn/activeRole/updated"
+              ],
+              "title": "Turn/activeRole/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/TurnActiveRoleUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Turn/activeRole/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "hook/started"
               ],
               "title": "Hook/startedNotificationMethod",
@@ -16776,6 +16797,25 @@
       "title": "ThreadNameUpdatedNotification",
       "type": "object"
     },
+    "ThreadOrchestratedRoleTokenUsage": {
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "tokenUsage": {
+          "$ref": "#/definitions/TokenUsageBreakdown"
+        }
+      },
+      "required": [
+        "model",
+        "role",
+        "tokenUsage"
+      ],
+      "type": "object"
+    },
     "ThreadReadParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -17794,6 +17834,13 @@
             "null"
           ]
         },
+        "orchestratedRoleUsage": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ThreadOrchestratedRoleTokenUsage"
+          },
+          "type": "array"
+        },
         "total": {
           "$ref": "#/definitions/TokenUsageBreakdown"
         }
@@ -18047,6 +18094,29 @@
         "items",
         "status"
       ],
+      "type": "object"
+    },
+    "TurnActiveRoleUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId"
+      ],
+      "title": "TurnActiveRoleUpdatedNotification",
       "type": "object"
     },
     "TurnCompletedNotification": {
