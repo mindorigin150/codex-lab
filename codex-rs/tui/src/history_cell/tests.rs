@@ -1710,6 +1710,7 @@ fn coalesces_reads_across_multiple_calls() {
             }],
             ExecCommandSource::Agent,
             /*interaction_input*/ None,
+            crate::exec_cell::ExecCellAttribution::Unattributed,
         )
         .unwrap();
     cell.complete_call("c2", CommandOutput::default(), Duration::from_millis(1));
@@ -1725,6 +1726,7 @@ fn coalesces_reads_across_multiple_calls() {
             }],
             ExecCommandSource::Agent,
             /*interaction_input*/ None,
+            crate::exec_cell::ExecCellAttribution::Unattributed,
         )
         .unwrap();
     cell.complete_call("c3", CommandOutput::default(), Duration::from_millis(1));
