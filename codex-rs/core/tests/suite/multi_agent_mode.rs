@@ -253,7 +253,13 @@ async fn orchestrated_mode_uses_internal_roles_without_proactive_subagent_text()
             ]),
             sse(vec![
                 ev_response_created("resp-worker"),
+                ev_assistant_message("msg-worker", "worker: complete\nno changes required"),
                 ev_completed("resp-worker"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-result-review"),
+                ev_assistant_message("msg-result-review", "result-review: approved\nverified"),
+                ev_completed("resp-result-review"),
             ]),
             sse(vec![
                 ev_response_created("resp-orchestrator"),
@@ -296,8 +302,8 @@ async fn orchestrated_mode_uses_internal_roles_without_proactive_subagent_text()
     .await;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 6);
-    let request = &requests[5];
+    assert_eq!(requests.len(), 7);
+    let request = &requests[6];
     assert_eq!(
         request.body_json()["reasoning"]["effort"].as_str(),
         Some("high")
@@ -313,9 +319,10 @@ async fn orchestrated_mode_uses_internal_roles_without_proactive_subagent_text()
             count_containing(&assistant_texts, "explorer: no final packet produced"),
             count_containing(&assistant_texts, "worker-plan: no final packet produced"),
             count_containing(&assistant_texts, "plan-review: approved"),
-            count_containing(&assistant_texts, "worker: no final packet produced"),
+            count_containing(&assistant_texts, "worker: complete\nno changes required"),
+            count_containing(&assistant_texts, "result-review: approved\nverified"),
         ),
-        (1, 1, 1, 1, 1)
+        (1, 1, 1, 1, 1, 1)
     );
 
     Ok(())
@@ -407,8 +414,27 @@ async fn orchestrated_mode_spawned_subagent_inherits_orchestrated_mode() -> Resu
         },
         sse(vec![
             ev_response_created("parent-worker"),
-            ev_assistant_message("parent-worker-msg", "worker: parent ready"),
+            ev_assistant_message("parent-worker-msg", "worker: complete; parent ready"),
             ev_completed("parent-worker"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_contains(request, "spawn child in orchestrated mode")
+                && request_last_developer_message_contains(
+                    request,
+                    "You are the orchestrator result-review phase in Orchestrated mode.",
+                )
+        },
+        sse(vec![
+            ev_response_created("parent-result-review"),
+            ev_assistant_message(
+                "parent-result-review-msg",
+                "result-review: approved parent result",
+            ),
+            ev_completed("parent-result-review"),
         ]),
     )
     .await;
@@ -523,8 +549,27 @@ async fn orchestrated_mode_spawned_subagent_inherits_orchestrated_mode() -> Resu
         },
         sse(vec![
             ev_response_created("child-worker"),
-            ev_assistant_message("child-worker-msg", "worker: child result"),
+            ev_assistant_message("child-worker-msg", "worker: complete; child result"),
             ev_completed("child-worker"),
+        ]),
+    )
+    .await;
+    let child_result_review = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_is_collab_spawn(request)
+                && request_last_developer_message_contains(
+                    request,
+                    "You are the orchestrator result-review phase in Orchestrated mode.",
+                )
+        },
+        sse(vec![
+            ev_response_created("child-result-review"),
+            ev_assistant_message(
+                "child-result-review-msg",
+                "result-review: approved child result",
+            ),
+            ev_completed("child-result-review"),
         ]),
     )
     .await;
@@ -638,7 +683,20 @@ async fn orchestrated_mode_spawned_subagent_inherits_orchestrated_mode() -> Resu
     let child_orchestrator_tools = request_tool_names(&child_orchestrator_request);
     assert!(
         !child_orchestrator_tools.is_empty(),
-        "spawned Orchestrated root should receive tools after plan approval"
+        "spawned Orchestrated root should receive collaboration tools after plan approval"
+    );
+    assert!(
+        !child_orchestrator_tools.iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                "apply_patch" | "exec_command" | "shell_command" | "write_stdin"
+            )
+        }),
+        "spawned Orchestrated root should not execute worker tools: {child_orchestrator_tools:?}"
+    );
+    assert!(
+        child_result_review.last_request().is_some(),
+        "spawned child should run result review"
     );
 
     Ok(())
@@ -649,6 +707,8 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
+    let worker_packet =
+        "worker: complete; patch the orchestrated flow\nevidence: /tmp/orchestrated-worker.log";
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -684,8 +744,13 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
             ]),
             sse(vec![
                 ev_response_created("resp-worker-followup"),
-                ev_assistant_message("msg-worker", "worker: patch the orchestrated flow"),
+                ev_assistant_message("msg-worker", worker_packet),
                 ev_completed_with_tokens("resp-worker-followup", /*total_tokens*/ 25),
+            ]),
+            sse(vec![
+                ev_response_created("resp-result-review"),
+                ev_assistant_message("msg-result-review", "result-review: approved; verified"),
+                ev_completed_with_tokens("resp-result-review", /*total_tokens*/ 27),
             ]),
             sse(vec![
                 ev_response_created("resp-orchestrator"),
@@ -771,14 +836,15 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
             Some("worker-plan".to_string()),
             Some("plan-review".to_string()),
             Some("worker".to_string()),
+            Some("result-review".to_string()),
             None,
         ]
     );
-    assert_eq!(token_events.len(), 7);
+    assert_eq!(token_events.len(), 8);
     let final_token_event = token_events.last().expect("final token event");
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 7);
+    assert_eq!(requests.len(), 8);
 
     let contract_request = requests[0].body_json();
     assert_eq!(
@@ -887,7 +953,17 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
     );
     requests[5].function_call_output("worker-list-agents");
 
-    let orchestrator_request = requests[6].body_json();
+    let result_review_request = requests[6].body_json();
+    assert_eq!(
+        result_review_request["model"].as_str(),
+        Some(test.session_configured.model.as_str())
+    );
+    assert_eq!(
+        request_tool_names(&result_review_request),
+        Vec::<String>::new()
+    );
+
+    let orchestrator_request = requests[7].body_json();
     assert_eq!(
         orchestrator_request["model"].as_str(),
         Some(test.session_configured.model.as_str())
@@ -901,14 +977,25 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
         !body_has_function_call_output(&orchestrator_request, "worker-list-agents"),
         "orchestrator should receive compact role packets, not worker tool outputs"
     );
-    let orchestrator_input = requests[6].input();
+    let orchestrator_tools = request_tool_names(&orchestrator_request);
+    assert!(
+        !orchestrator_tools.iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                "apply_patch" | "exec_command" | "shell_command" | "write_stdin"
+            )
+        }),
+        "orchestrator should not receive worker tools: {orchestrator_tools:?}"
+    );
+    let orchestrator_input = requests[7].input();
     let orchestrator_assistant_texts = message_texts(&orchestrator_input, "assistant");
     let compact_packets = [
         "task-contract: add orchestrated coverage",
         "explorer: inspect multi-agent mode",
         "worker-plan: update flow and tests",
         "plan-review: approved; aligned",
-        "worker: patch the orchestrated flow",
+        "worker: complete; patch the orchestrated flow",
+        "result-review: approved; verified",
     ];
     for packet in compact_packets {
         assert_eq!(
@@ -919,6 +1006,13 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
     }
     assert_eq!(
         count_containing(
+            &orchestrator_assistant_texts,
+            "/tmp/orchestrated-worker.log"
+        ),
+        1
+    );
+    assert_eq!(
+        count_containing(
             &developer_texts(&orchestrator_input),
             "You are the orchestrator role for the remainder of this Orchestrated-mode turn.",
         ),
@@ -926,7 +1020,7 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
     );
 
     let token_info = final_token_event.info.as_ref().expect("token usage info");
-    assert_eq!(token_info.total_token_usage.total_tokens, 125);
+    assert_eq!(token_info.total_token_usage.total_tokens, 152);
     assert_eq!(token_info.last_token_usage.total_tokens, 30);
     let role_usage = token_info
         .orchestrated_role_token_usage
@@ -947,6 +1041,7 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
             ("worker-plan", "gpt-5.2", 15),
             ("plan-review", test.session_configured.model.as_str(), 20),
             ("worker", "gpt-5.2", 45),
+            ("result-review", test.session_configured.model.as_str(), 27,),
             ("orchestrator", test.session_configured.model.as_str(), 30),
         ]
     );
@@ -963,7 +1058,6 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
             "durable history should contain only compact packet: {packet}"
         );
     }
-
     let home = test.home.clone();
     drop(test);
     let mut resume_builder = test_codex().with_config(configure_multi_agent_v2);
@@ -998,8 +1092,8 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
     .await;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 8);
-    let resumed_input = requests[7].input();
+    assert_eq!(requests.len(), 9);
+    let resumed_input = requests[8].input();
     let resumed_assistant_texts = message_texts(&resumed_input, "assistant");
     for packet in compact_packets {
         assert_eq!(
@@ -1009,7 +1103,7 @@ async fn orchestrated_mode_runs_internal_roles_before_orchestrator() -> Result<(
         );
     }
     assert!(
-        !body_has_function_call_output(&requests[7].body_json(), "worker-list-agents"),
+        !body_has_function_call_output(&requests[8].body_json(), "worker-list-agents"),
         "resumed context should omit internal worker tool output"
     );
 
@@ -1021,6 +1115,7 @@ async fn orchestrated_mode_revises_plan_before_worker_execution() -> Result<()> 
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
+    let oversized_worker_packet = format!("worker: complete; {}", "e".repeat(10_000));
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -1055,9 +1150,43 @@ async fn orchestrated_mode_revises_plan_before_worker_execution() -> Result<()> 
                 ev_completed("resp-gate-review-2"),
             ]),
             sse(vec![
-                ev_response_created("resp-gate-worker"),
-                ev_assistant_message("msg-gate-worker", "worker: executed narrow change"),
-                ev_completed("resp-gate-worker"),
+                ev_response_created("resp-gate-worker-1"),
+                ev_assistant_message("msg-gate-worker-1", "worker: incomplete; tests missing"),
+                ev_completed("resp-gate-worker-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-gate-result-review-1"),
+                ev_assistant_message(
+                    "msg-gate-result-review-1",
+                    "result-review: revise; run required tests",
+                ),
+                ev_completed("resp-gate-result-review-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-gate-worker-2"),
+                ev_assistant_message("msg-gate-worker-2", &oversized_worker_packet),
+                ev_completed("resp-gate-worker-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-gate-result-review-2"),
+                ev_assistant_message(
+                    "msg-gate-result-review-2",
+                    "result-review: approved; but worker packet was truncated",
+                ),
+                ev_completed("resp-gate-result-review-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-gate-worker-3"),
+                ev_assistant_message("msg-gate-worker-3", "worker: complete; required tests pass"),
+                ev_completed("resp-gate-worker-3"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-gate-result-review-3"),
+                ev_assistant_message(
+                    "msg-gate-result-review-3",
+                    "result-review: approved; complete",
+                ),
+                ev_completed("resp-gate-result-review-3"),
             ]),
             sse(vec![
                 ev_response_created("resp-gate-root"),
@@ -1076,7 +1205,7 @@ async fn orchestrated_mode_revises_plan_before_worker_execution() -> Result<()> 
     .await;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 8);
+    assert_eq!(requests.len(), 13);
     for request in requests.iter().take(6) {
         assert_eq!(
             count_containing(
@@ -1099,6 +1228,28 @@ async fn orchestrated_mode_revises_plan_before_worker_execution() -> Result<()> 
         count_containing(
             &message_texts(&worker_input, "assistant"),
             "plan-review: approved; scope aligned",
+        ),
+        1
+    );
+    let corrected_worker_input = requests[8].input();
+    assert_eq!(
+        count_containing(
+            &message_texts(&corrected_worker_input, "assistant"),
+            "result-review: revise; run required tests",
+        ),
+        1
+    );
+    assert_eq!(
+        count_containing(
+            &message_texts(&requests[10].input(), "assistant"),
+            "[packet truncated: phase output exceeded the 8192-byte hard limit]",
+        ),
+        1
+    );
+    assert_eq!(
+        count_containing(
+            &message_texts(&requests[12].input(), "assistant"),
+            "result-review: approved; complete",
         ),
         1
     );
@@ -1196,7 +1347,13 @@ async fn orchestrated_mode_internal_roles_hide_legacy_collaboration_tools() -> R
             ]),
             sse(vec![
                 ev_response_created("resp-legacy-worker"),
+                ev_assistant_message("msg-legacy-worker", "worker: complete; no changes"),
                 ev_completed("resp-legacy-worker"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-legacy-result-review"),
+                ev_assistant_message("msg-legacy-result-review", "result-review: approved"),
+                ev_completed("resp-legacy-result-review"),
             ]),
             sse(vec![
                 ev_response_created("resp-legacy-orchestrator"),
@@ -1244,8 +1401,8 @@ async fn orchestrated_mode_internal_roles_hide_legacy_collaboration_tools() -> R
     .await;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 6);
-    for request in requests.iter().take(5) {
+    assert_eq!(requests.len(), 7);
+    for request in requests.iter().take(6) {
         let tool_names = request_tool_names(&request.body_json());
         assert!(
             !tool_names.iter().any(|tool| {
@@ -1303,8 +1460,12 @@ async fn orchestrated_mode_explorer_can_run_read_only_shell_command() -> Result<
                 ev_completed("resp-plan-review-shell-read"),
             ]),
             sse(vec![
-                ev_assistant_message("msg-worker-shell-read", "worker: no changes"),
+                ev_assistant_message("msg-worker-shell-read", "worker: complete; no changes"),
                 ev_completed("resp-worker-shell-read"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-result-review-shell-read", "result-review: approved"),
+                ev_completed("resp-result-review-shell-read"),
             ]),
             sse(vec![
                 ev_assistant_message("msg-root-shell-read-1", "orc: done"),
@@ -1382,8 +1543,12 @@ async fn orchestrated_mode_explorer_blocks_mutating_shell_command() -> Result<()
                 ev_completed("resp-plan-review-shell-block"),
             ]),
             sse(vec![
-                ev_assistant_message("msg-worker-shell-block", "worker: no changes"),
+                ev_assistant_message("msg-worker-shell-block", "worker: complete; no changes"),
                 ev_completed("resp-worker-shell-block"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-result-review-shell-block", "result-review: approved"),
+                ev_completed("resp-result-review-shell-block"),
             ]),
             sse(vec![
                 ev_assistant_message("msg-root-shell-block-1", "orc: done"),
@@ -1451,8 +1616,13 @@ async fn orchestrated_mode_internal_phase_has_hard_step_limit() -> Result<()> {
         ]),
         sse(vec![
             ev_response_created("step-limit-worker"),
-            ev_assistant_message("step-limit-worker-msg", "worker: no changes"),
+            ev_assistant_message("step-limit-worker-msg", "worker: complete; no changes"),
             ev_completed("step-limit-worker"),
+        ]),
+        sse(vec![
+            ev_response_created("step-limit-result-review"),
+            ev_assistant_message("step-limit-result-review-msg", "result-review: approved"),
+            ev_completed("step-limit-result-review"),
         ]),
         sse(vec![
             ev_response_created("step-limit-root"),
@@ -1470,7 +1640,7 @@ async fn orchestrated_mode_internal_phase_has_hard_step_limit() -> Result<()> {
     .await;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 37);
+    assert_eq!(requests.len(), 38);
     assert_eq!(
         count_containing(
             &developer_texts(&requests[33].input()),
@@ -1510,8 +1680,13 @@ async fn orchestrated_mode_runs_internal_roles_for_queued_user_input() -> Result
         ])],
         vec![streaming_chunk(vec![
             ev_response_created("resp-worker-1"),
-            ev_assistant_message("msg-worker-1", "worker: first patch"),
+            ev_assistant_message("msg-worker-1", "worker: complete; first patch"),
             ev_completed_with_tokens("resp-worker-1", /*total_tokens*/ 25),
+        ])],
+        vec![streaming_chunk(vec![
+            ev_response_created("resp-result-review-1"),
+            ev_assistant_message("msg-result-review-1", "result-review: approved first"),
+            ev_completed_with_tokens("resp-result-review-1", /*total_tokens*/ 27),
         ])],
         vec![
             streaming_chunk(vec![
@@ -1628,7 +1803,7 @@ async fn orchestrated_mode_runs_internal_roles_for_queued_user_input() -> Result
     .await;
 
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 15);
+    assert_eq!(requests.len(), 16);
     let request_bodies = requests
         .iter()
         .map(|request| serde_json::from_slice::<Value>(request))
@@ -1659,23 +1834,27 @@ async fn orchestrated_mode_runs_internal_roles_for_queued_user_input() -> Result
             ),
             count_containing(
                 &texts,
+                "You are the orchestrator result-review phase in Orchestrated mode.",
+            ),
+            count_containing(
+                &texts,
                 "You are the orchestrator role for the remainder of this Orchestrated-mode turn.",
             ),
         ]
     };
-    for index in 0..6 {
-        let mut expected = [0; 6];
-        expected[index % 6] = 1;
+    for index in 0..7 {
+        let mut expected = [0; 7];
+        expected[index % 7] = 1;
         assert_eq!(developer_prompt_counts(index), expected, "request {index}");
     }
-    for (index, phase) in [0, 1, 2, 3, 2, 3, 2, 3, 5].into_iter().enumerate() {
-        let index = index + 6;
-        let mut expected = [0; 6];
+    for (index, phase) in [0, 1, 2, 3, 2, 3, 2, 3, 6].into_iter().enumerate() {
+        let index = index + 7;
+        let mut expected = [0; 7];
         expected[phase] = 1;
         assert_eq!(developer_prompt_counts(index), expected, "request {index}");
     }
 
-    let second_explorer_input = request_bodies[7]
+    let second_explorer_input = request_bodies[8]
         .get("input")
         .and_then(Value::as_array)
         .expect("second explorer input");
@@ -1686,7 +1865,7 @@ async fn orchestrated_mode_runs_internal_roles_for_queued_user_input() -> Result
         ),
         1
     );
-    let final_orchestrator_request = &request_bodies[14];
+    let final_orchestrator_request = &request_bodies[15];
     assert_eq!(
         final_orchestrator_request
             .get("tools")
@@ -1706,7 +1885,7 @@ async fn orchestrated_mode_runs_internal_roles_for_queued_user_input() -> Result
             ),
             count_containing(
                 &message_texts(final_orchestrator_input, "assistant"),
-                "worker: second patch",
+                "worker: complete; second patch",
             ),
         ),
         (1, 0)
@@ -1744,8 +1923,13 @@ async fn orchestrated_mode_retry_preserves_role_instruction() -> Result<()> {
         ])],
         vec![streaming_chunk(vec![
             ev_response_created("resp-worker"),
-            ev_assistant_message("msg-worker", "worker: retry result"),
+            ev_assistant_message("msg-worker", "worker: complete; retry result"),
             ev_completed("resp-worker"),
+        ])],
+        vec![streaming_chunk(vec![
+            ev_response_created("resp-result-review"),
+            ev_assistant_message("msg-result-review", "result-review: approved retry"),
+            ev_completed("resp-result-review"),
         ])],
         vec![streaming_chunk(vec![
             ev_response_created("resp-orchestrator"),
@@ -1815,7 +1999,7 @@ async fn orchestrated_mode_retry_preserves_role_instruction() -> Result<()> {
         .iter()
         .map(|request| serde_json::from_slice::<Value>(request))
         .collect::<serde_json::Result<Vec<_>>>()?;
-    assert_eq!(request_bodies.len(), 7);
+    assert_eq!(request_bodies.len(), 8);
     for request in request_bodies.iter().skip(1).take(2) {
         let input = request
             .get("input")
