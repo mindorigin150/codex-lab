@@ -81,6 +81,69 @@ async fn cap_is_reported_without_losing_observed_byte_count() {
     assert_eq!(descriptor.status, OutputArtifactStatus::Capped);
 }
 
+#[tokio::test]
+async fn extreme_token_threshold_cannot_grow_pending_memory_without_bound() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let output_dir = AbsolutePathBuf::try_from(temp_dir.path().join("artifacts"))
+        .expect("artifact root is absolute");
+    let store = OutputArtifactStore::new(
+        ToolOutputSpillConfig {
+            enabled: true,
+            token_threshold: usize::MAX,
+            preview_token_limit: 3,
+            max_artifact_bytes: 2 * 1024 * 1024,
+            max_store_bytes: 4 * 1024 * 1024,
+            retention_days: 7,
+            output_dir,
+        },
+        "thread-bounded",
+    )
+    .expect("enabled store");
+    let mut spool = store.spool();
+    let handle = spool.handle();
+
+    spool.push(&vec![b'x'; 1024 * 1024]).await;
+
+    assert!(spool.pending.is_empty());
+    assert_eq!(
+        handle
+            .snapshot()
+            .await
+            .expect("forced artifact")
+            .stored_bytes,
+        1024 * 1024
+    );
+}
+
+#[tokio::test]
+async fn root_quota_is_shared_across_session_stores_in_one_process() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let output_dir = AbsolutePathBuf::try_from(temp_dir.path().join("shared"))
+        .expect("artifact root is absolute");
+    let config = ToolOutputSpillConfig {
+        enabled: true,
+        token_threshold: 0,
+        preview_token_limit: 3,
+        max_artifact_bytes: 1024,
+        max_store_bytes: 16,
+        retention_days: 7,
+        output_dir,
+    };
+    let store_a = OutputArtifactStore::new(config.clone(), "thread-a").expect("store a");
+    let store_b = OutputArtifactStore::new(config, "thread-b").expect("store b");
+    let mut spool_a = store_a.spool();
+    let mut spool_b = store_b.spool();
+    let handle_b = spool_b.handle();
+
+    spool_a.push(b"123456789012").await;
+    spool_b.push(b"abcdefghijkl").await;
+
+    let descriptor_b = handle_b.snapshot().await.expect("second artifact");
+    assert_eq!(descriptor_b.stored_bytes, 4);
+    assert_eq!(descriptor_b.omitted_bytes, 8);
+    assert_eq!(descriptor_b.status, OutputArtifactStatus::Capped);
+}
+
 #[test]
 fn rejects_thread_ids_that_are_not_single_path_components() {
     let temp_dir = TempDir::new().expect("temp dir");

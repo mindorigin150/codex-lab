@@ -1,4 +1,8 @@
 use super::process::UnifiedExecProcess;
+use crate::config::ToolOutputSpillConfig;
+use crate::unified_exec::NoopSpawnLifecycle;
+use crate::unified_exec::OutputArtifactStore;
+use crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES;
 use crate::unified_exec::UnifiedExecError;
 use codex_exec_server::ExecProcess;
 use codex_exec_server::ExecProcessEventReceiver;
@@ -11,10 +15,139 @@ use codex_exec_server::StartedExecProcess;
 use codex_exec_server::WriteResponse;
 use codex_exec_server::WriteStatus;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_pipe_artifact_captures_bytes_before_head_tail_omission() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let artifact_root =
+        codex_utils_absolute_path::AbsolutePathBuf::try_from(temp_dir.path().join("artifacts"))
+            .expect("absolute artifact root");
+    let store = OutputArtifactStore::new(
+        ToolOutputSpillConfig {
+            enabled: true,
+            token_threshold: 1,
+            preview_token_limit: 100,
+            max_artifact_bytes: 2 * 1024 * 1024,
+            max_store_bytes: 4 * 1024 * 1024,
+            retention_days: 7,
+            output_dir: artifact_root,
+        },
+        "thread-e2e",
+    )
+    .expect("enabled artifact store");
+    let byte_count = UNIFIED_EXEC_OUTPUT_MAX_BYTES + 128 * 1024;
+    let args = vec!["-c".to_string(), format!("head -c {byte_count} /dev/zero")];
+    let spawned = codex_utils_pty::pipe::spawn_process_no_stdin(
+        "/bin/sh",
+        &args,
+        temp_dir.path(),
+        &HashMap::new(),
+        &None,
+    )
+    .await
+    .expect("spawn local pipe process");
+    let process = UnifiedExecProcess::from_spawned(
+        spawned,
+        codex_sandboxing::SandboxType::None,
+        Box::new(NoopSpawnLifecycle),
+        Some(store.spool()),
+    )
+    .await
+    .expect("start unified exec process");
+    let handles = process.output_handles();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !handles
+            .output_closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            handles.output_closed_notify.notified().await;
+        }
+    })
+    .await
+    .expect("output should drain");
+
+    let descriptor = process
+        .output_artifact_descriptor()
+        .await
+        .expect("artifact descriptor");
+    assert_eq!(descriptor.observed_bytes, byte_count as u64);
+    assert_eq!(descriptor.stored_bytes, byte_count as u64);
+    assert!(descriptor.complete);
+    assert_eq!(
+        std::fs::read(&descriptor.path).expect("read artifact"),
+        vec![0; byte_count]
+    );
+
+    let buffer = handles.output_buffer.lock().await;
+    assert_eq!(buffer.total_bytes(), byte_count);
+    assert_eq!(
+        buffer.omitted_bytes(),
+        byte_count - UNIFIED_EXEC_OUTPUT_MAX_BYTES
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_early_sandbox_denial_carries_completed_artifact() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let artifact_root = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        temp_dir.path().join("sandbox-artifacts"),
+    )
+    .expect("absolute artifact root");
+    let store = OutputArtifactStore::new(
+        ToolOutputSpillConfig {
+            enabled: true,
+            token_threshold: 1,
+            preview_token_limit: 100,
+            max_artifact_bytes: 1024,
+            max_store_bytes: 4096,
+            retention_days: 7,
+            output_dir: artifact_root,
+        },
+        "thread-denial",
+    )
+    .expect("enabled artifact store");
+    let args = vec![
+        "-c".to_string(),
+        "printf 'Operation not permitted'; exit 1".to_string(),
+    ];
+    let spawned = codex_utils_pty::pipe::spawn_process_no_stdin(
+        "/bin/sh",
+        &args,
+        temp_dir.path(),
+        &HashMap::new(),
+        &None,
+    )
+    .await
+    .expect("spawn local pipe process");
+
+    let err = UnifiedExecProcess::from_spawned(
+        spawned,
+        codex_sandboxing::SandboxType::LinuxSeccomp,
+        Box::new(NoopSpawnLifecycle),
+        Some(store.spool()),
+    )
+    .await
+    .expect_err("sandbox denial should be detected");
+    let UnifiedExecError::SandboxDenied {
+        output_artifact: Some(descriptor),
+        ..
+    } = err
+    else {
+        panic!("expected sandbox denial with artifact");
+    };
+    assert!(descriptor.complete);
+    assert_eq!(
+        std::fs::read_to_string(descriptor.path).expect("read denial artifact"),
+        "Operation not permitted"
+    );
+}
 
 struct MockExecProcess {
     process_id: ProcessId,

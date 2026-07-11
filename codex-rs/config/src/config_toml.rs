@@ -671,7 +671,9 @@ pub struct ToolsToml {
 #[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct ToolOutputSpillToml {
-    /// Whether oversized unified-exec output is saved as a private local artifact.
+    /// Whether oversized local unified-exec output is saved as a private artifact.
+    /// Remote exec-server output remains retained/truncated and never creates a local artifact.
+    /// Local processes are backpressured by artifact disk writes when this is enabled.
     pub enabled: Option<bool>,
     /// Approximate token count above which an artifact is created.
     pub token_threshold: Option<usize>,
@@ -679,7 +681,8 @@ pub struct ToolOutputSpillToml {
     pub preview_token_limit: Option<usize>,
     /// Maximum bytes stored for one artifact.
     pub max_artifact_bytes: Option<u64>,
-    /// Maximum bytes retained by the artifact store.
+    /// Approximate process-local quota shared by sessions using the same artifact root.
+    /// Separate Codex processes can temporarily exceed this value.
     pub max_store_bytes: Option<u64>,
     /// Number of days artifacts remain eligible for reuse before cleanup.
     pub retention_days: Option<u64>,

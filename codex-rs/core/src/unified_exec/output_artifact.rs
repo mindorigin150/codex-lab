@@ -2,6 +2,9 @@ use std::fs::DirBuilder;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
+use std::sync::Weak;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -16,6 +19,11 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::config::ToolOutputSpillConfig;
+
+const MAX_PENDING_OUTPUT_BYTES: usize = 1024 * 1024;
+
+static ROOT_QUOTAS: OnceLock<StdMutex<std::collections::HashMap<PathBuf, Weak<RootQuota>>>> =
+    OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,18 +51,79 @@ pub(crate) struct OutputArtifactDescriptor {
 pub(crate) struct OutputArtifactStore {
     config: ToolOutputSpillConfig,
     thread_dir: PathBuf,
+    initialized: OnceCell<()>,
+    root_quota: Arc<RootQuota>,
+}
+
+#[derive(Debug)]
+struct RootQuota {
+    root: PathBuf,
     initialized_bytes: OnceCell<u64>,
     stored_bytes: AtomicU64,
+}
+
+impl RootQuota {
+    fn shared(root: PathBuf) -> Arc<Self> {
+        let quotas = ROOT_QUOTAS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
+        let mut quotas = quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(quota) = quotas.get(&root).and_then(Weak::upgrade) {
+            return quota;
+        }
+        let quota = Arc::new(Self {
+            root: root.clone(),
+            initialized_bytes: OnceCell::new(),
+            stored_bytes: AtomicU64::new(0),
+        });
+        quotas.insert(root, Arc::downgrade(&quota));
+        quota
+    }
+
+    async fn initialize(&self, retention: Duration) -> std::io::Result<()> {
+        let root = self.root.clone();
+        self.initialized_bytes
+            .get_or_try_init(|| async {
+                let bytes = tokio::task::spawn_blocking(move || {
+                    create_private_dir(&root)?;
+                    cleanup_and_measure(&root, retention)
+                })
+                .await
+                .map_err(std::io::Error::other)??;
+                self.stored_bytes.store(bytes, Ordering::Release);
+                Ok::<u64, std::io::Error>(bytes)
+            })
+            .await?;
+        Ok(())
+    }
+
+    fn reserve(&self, requested: u64, max_store_bytes: u64) -> u64 {
+        let mut current = self.stored_bytes.load(Ordering::Acquire);
+        loop {
+            let available = max_store_bytes.saturating_sub(current);
+            let reserved = requested.min(available);
+            match self.stored_bytes.compare_exchange_weak(
+                current,
+                current.saturating_add(reserved),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return reserved,
+                Err(actual) => current = actual,
+            }
+        }
+    }
 }
 
 impl OutputArtifactStore {
     pub(crate) fn new(config: ToolOutputSpillConfig, thread_id: &str) -> Option<Arc<Self>> {
         (config.enabled && safe_path_component(thread_id)).then(|| {
+            let root = config.output_dir.as_path().to_path_buf();
             Arc::new(Self {
                 thread_dir: config.output_dir.as_path().join(thread_id),
+                root_quota: RootQuota::shared(root),
                 config,
-                initialized_bytes: OnceCell::new(),
-                stored_bytes: AtomicU64::new(0),
+                initialized: OnceCell::new(),
             })
         })
     }
@@ -76,43 +145,26 @@ impl OutputArtifactStore {
     }
 
     async fn initialize(&self) -> std::io::Result<()> {
-        if self.initialized_bytes.get().is_some() {
-            return Ok(());
-        }
-        let root = self.config.output_dir.as_path().to_path_buf();
         let thread_dir = self.thread_dir.clone();
         let retention = Duration::from_secs(self.config.retention_days.saturating_mul(86_400));
-        self.initialized_bytes
+        self.initialized
             .get_or_try_init(|| async {
-                let bytes = tokio::task::spawn_blocking(move || {
-                    create_private_dir(&root)?;
+                self.root_quota.initialize(retention).await?;
+                tokio::task::spawn_blocking(move || {
                     create_private_dir(&thread_dir)?;
-                    cleanup_and_measure(&root, retention)
+                    Ok::<(), std::io::Error>(())
                 })
                 .await
                 .map_err(std::io::Error::other)??;
-                self.stored_bytes.store(bytes, Ordering::Release);
-                Ok::<u64, std::io::Error>(bytes)
+                Ok::<(), std::io::Error>(())
             })
             .await?;
         Ok(())
     }
 
     fn reserve(&self, requested: u64) -> u64 {
-        let mut current = self.stored_bytes.load(Ordering::Acquire);
-        loop {
-            let available = self.config.max_store_bytes.saturating_sub(current);
-            let reserved = requested.min(available);
-            match self.stored_bytes.compare_exchange_weak(
-                current,
-                current.saturating_add(reserved),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return reserved,
-                Err(actual) => current = actual,
-            }
-        }
+        self.root_quota
+            .reserve(requested, self.config.max_store_bytes)
     }
 }
 
@@ -155,15 +207,21 @@ impl OutputArtifactSpool {
         }
 
         if self.file.is_none() {
-            self.pending.extend_from_slice(chunk);
             let approximate_tokens = self.observed_bytes.saturating_add(3) / 4;
-            if approximate_tokens <= self.store.config.token_threshold as u64 {
+            let pending_would_reach_limit =
+                self.pending.len().saturating_add(chunk.len()) >= MAX_PENDING_OUTPUT_BYTES;
+            if approximate_tokens <= self.store.config.token_threshold as u64
+                && !pending_would_reach_limit
+            {
+                self.pending.extend_from_slice(chunk);
                 return;
             }
             if let Err(err) = self.open_and_flush_pending().await {
                 self.failed = true;
                 self.pending.clear();
                 warn!("failed to create unified-exec output artifact: {err}");
+            } else if !self.capped {
+                self.write_bounded(chunk).await;
             }
             self.publish().await;
             return;
@@ -190,6 +248,9 @@ impl OutputArtifactSpool {
     }
 
     async fn write_bounded(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         let artifact_available = self
             .store
             .config

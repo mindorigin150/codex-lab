@@ -3,6 +3,8 @@ use codex_utils_path_uri::PathUri;
 use std::num::NonZeroUsize;
 use thiserror::Error;
 
+use super::OutputArtifactDescriptor;
+
 #[derive(Debug, Error)]
 pub(crate) enum UnifiedExecError {
     #[error("Failed to create unified exec process: {message}")]
@@ -26,6 +28,7 @@ pub(crate) enum UnifiedExecError {
         output: ExecToolCallOutput,
         original_token_count: Option<usize>,
         output_omitted_bytes: Option<NonZeroUsize>,
+        output_artifact: Option<OutputArtifactDescriptor>,
     },
     #[error("{path} is not valid on {}", std::env::consts::OS)]
     ForeignPath { path: PathUri },
@@ -46,6 +49,7 @@ impl UnifiedExecError {
             output,
             original_token_count: None,
             output_omitted_bytes: None,
+            output_artifact: None,
         }
     }
 
@@ -56,12 +60,38 @@ impl UnifiedExecError {
     ) -> Self {
         match self {
             Self::SandboxDenied {
-                message, output, ..
+                message,
+                output,
+                output_artifact,
+                ..
             } => Self::SandboxDenied {
                 message,
                 output,
                 original_token_count: Some(original_token_count),
                 output_omitted_bytes,
+                output_artifact,
+            },
+            other => other,
+        }
+    }
+
+    pub(crate) fn with_output_artifact(
+        self,
+        output_artifact: Option<OutputArtifactDescriptor>,
+    ) -> Self {
+        match self {
+            Self::SandboxDenied {
+                message,
+                output,
+                original_token_count,
+                output_omitted_bytes,
+                ..
+            } => Self::SandboxDenied {
+                message,
+                output,
+                original_token_count,
+                output_omitted_bytes,
+                output_artifact,
             },
             other => other,
         }

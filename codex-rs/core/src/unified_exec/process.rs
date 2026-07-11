@@ -37,6 +37,7 @@ use super::output_artifact::OutputArtifactSpool;
 use super::process_state::ProcessState;
 
 const EARLY_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(150);
+const EARLY_EXIT_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) trait SpawnLifecycle: std::fmt::Debug + Send + Sync {
     /// Returns file descriptors that must stay open across the child `exec()`.
     ///
@@ -324,7 +325,9 @@ impl UnifiedExecProcess {
             } else {
                 snippet
             };
-            return Err(UnifiedExecError::sandbox_denied(message, exec_output));
+            let artifact = self.output_artifact_descriptor().await;
+            return Err(UnifiedExecError::sandbox_denied(message, exec_output)
+                .with_output_artifact(artifact));
         }
         Ok(())
     }
@@ -364,11 +367,13 @@ impl UnifiedExecProcess {
         match exit_rx.try_recv() {
             Ok(exit_code) => {
                 managed.signal_exit(Some(exit_code));
+                managed.wait_for_early_exit_output().await;
                 managed.check_for_sandbox_denial().await?;
                 return Ok(managed);
             }
             Err(TryRecvError::Closed) => {
                 managed.signal_exit(/*exit_code*/ None);
+                managed.wait_for_early_exit_output().await;
                 managed.check_for_sandbox_denial().await?;
                 return Ok(managed);
             }
@@ -377,6 +382,7 @@ impl UnifiedExecProcess {
 
         if let Ok(exit_result) = tokio::time::timeout(EARLY_EXIT_GRACE_PERIOD, &mut exit_rx).await {
             managed.signal_exit(exit_result.ok());
+            managed.wait_for_early_exit_output().await;
             managed.check_for_sandbox_denial().await?;
             return Ok(managed);
         }
@@ -659,6 +665,22 @@ impl UnifiedExecProcess {
     pub(super) async fn output_artifact_descriptor(&self) -> Option<OutputArtifactDescriptor> {
         let artifact = self.output_artifact.as_ref()?;
         artifact.snapshot().await
+    }
+
+    async fn wait_for_early_exit_output(&self) {
+        if self.output_closed.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = tokio::time::timeout(EARLY_EXIT_OUTPUT_DRAIN_TIMEOUT, async {
+            loop {
+                let notified = self.output_closed_notify.notified();
+                if self.output_closed.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await;
     }
 }
 

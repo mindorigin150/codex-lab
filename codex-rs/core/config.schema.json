@@ -3000,7 +3000,7 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {
-          "description": "Whether oversized unified-exec output is saved as a private local artifact.",
+          "description": "Whether oversized local unified-exec output is saved as a private artifact. Remote exec-server output remains retained/truncated and never creates a local artifact. Local processes are backpressured by artifact disk writes when this is enabled.",
           "type": "boolean"
         },
         "max_artifact_bytes": {
@@ -3010,7 +3010,7 @@
           "type": "integer"
         },
         "max_store_bytes": {
-          "description": "Maximum bytes retained by the artifact store.",
+          "description": "Approximate process-local quota shared by sessions using the same artifact root. Separate Codex processes can temporarily exceed this value.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"

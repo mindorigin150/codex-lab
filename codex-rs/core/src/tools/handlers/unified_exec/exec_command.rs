@@ -456,6 +456,7 @@ impl ExecCommandHandler {
                 output,
                 original_token_count,
                 output_omitted_bytes,
+                output_artifact,
                 ..
             }) => {
                 let output_text = output.aggregated_output.text;
@@ -474,7 +475,7 @@ impl ExecCommandHandler {
                     exit_code: Some(output.exit_code),
                     original_token_count: Some(original_token_count),
                     output_omitted_bytes,
-                    output_artifact: None,
+                    output_artifact,
                     hook_command: Some(hook_command),
                 }))
             }
