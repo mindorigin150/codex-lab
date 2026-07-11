@@ -142,7 +142,10 @@ async fn orchestrated_mode_disabled_does_not_run_internal_phases() -> Result<()>
     let requests = responses.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(
-        count_containing(&developer_texts(&requests[0].input()), "Orchestrated mode",),
+        count_containing(
+            &developer_texts(&requests[0].input()),
+            "phase in Orchestrated mode",
+        ),
         0
     );
     Ok(())

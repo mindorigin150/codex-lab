@@ -660,9 +660,7 @@ pub(super) fn add_sampling_instruction(turn_context: &TurnContext, input: &mut V
         }
         return;
     }
-    if turn_context.collaboration_mode.mode == ModeKind::Orchestrated
-        && turn_context.config.orchestrated_mode.enabled
-    {
+    if turn_context.collaboration_mode.mode == ModeKind::Orchestrated {
         input.push(developer_instruction_item(
             codex_prompts::ORCHESTRATED_ORCHESTRATOR,
         ));
