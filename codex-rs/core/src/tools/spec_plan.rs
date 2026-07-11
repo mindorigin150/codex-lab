@@ -1,12 +1,5 @@
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
-use crate::agent::role::EXPLORER_ROLE_NAME;
-use crate::agent::role::PLAN_EVIDENCE_ROLE_NAME;
-use crate::agent::role::PLAN_REVIEW_ROLE_NAME;
-use crate::agent::role::RESULT_REVIEW_ROLE_NAME;
-use crate::agent::role::TASK_CONTRACT_ROLE_NAME;
-use crate::agent::role::WORKER_PLAN_ROLE_NAME;
-use crate::agent::role::WORKER_ROLE_NAME;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
@@ -69,7 +62,6 @@ use crate::tools::router::ToolRouterParams;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_mcp::ToolInfo;
-use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
@@ -99,7 +91,6 @@ use codex_tools::shell_type_for_model_and_features;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use tracing::instrument;
 use tracing::warn;
 
@@ -133,6 +124,13 @@ impl PlannedTools {
     {
         self.runtimes
             .push(override_tool_exposure(Arc::new(handler), exposure));
+    }
+
+    fn add_dispatch_only<T>(&mut self, handler: T)
+    where
+        T: CoreToolRuntime + 'static,
+    {
+        self.add_with_exposure(handler, ToolExposure::Hidden);
     }
 
     fn add_hosted_spec(&mut self, spec: ToolSpec) {
@@ -199,12 +197,7 @@ fn build_tool_specs_and_registry(
     add_tool_sources(&context, &mut planned_tools);
     apply_direct_model_only_namespace_overrides(turn_context, &mut planned_tools);
     append_tool_search_executor(&context, &mut planned_tools);
-    if !(orchestrated_phase_has_no_tools(turn_context.orchestrated_role)
-        || turn_context.collaboration_mode.mode == ModeKind::Orchestrated
-            && turn_context.orchestrated_role.is_none())
-    {
-        prepend_code_mode_executors(&context, &mut planned_tools);
-    }
+    prepend_code_mode_executors(&context, &mut planned_tools);
     build_model_visible_specs_and_registry(turn_context, planned_tools)
 }
 
@@ -364,7 +357,6 @@ fn agent_jobs_tools_enabled(turn_context: &TurnContext) -> bool {
         .features
         .get()
         .enabled(Feature::SpawnCsv)
-        && turn_context.orchestrated_role.is_none()
         && collab_tools_enabled(turn_context)
 }
 
@@ -590,8 +582,8 @@ fn code_mode_namespace_descriptions(
 
 #[instrument(level = "trace", skip_all)]
 fn add_tool_sources(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
-    let turn_context = context.step_context.turn.as_ref();
     if crate::guardian::is_guardian_reviewer_source(&context.step_context.turn.session_source) {
+        let turn_context = context.step_context.turn.as_ref();
         let environment_mode = tool_environment_mode(context.step_context);
         if environment_mode.has_environment() {
             let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
@@ -615,28 +607,6 @@ fn add_tool_sources(context: &CoreToolPlanContext<'_>, planned_tools: &mut Plann
         return;
     }
 
-    if turn_context.collaboration_mode.mode == ModeKind::Orchestrated
-        && turn_context.orchestrated_role.is_none()
-    {
-        if turn_context
-            .orchestrated_execution_approved
-            .load(Ordering::Relaxed)
-        {
-            add_collaboration_tools(context, planned_tools);
-        }
-        return;
-    }
-
-    match context.step_context.turn.orchestrated_role {
-        role if orchestrated_phase_has_shell_only(role) => {
-            add_shell_tools(context, planned_tools);
-            return;
-        }
-        role if orchestrated_phase_has_no_tools(role) => return,
-        Some(WORKER_ROLE_NAME) | None => {}
-        Some(_) => return,
-    }
-
     add_shell_tools(context, planned_tools);
     add_mcp_resource_tools(context, planned_tools);
     add_core_utility_tools(context, planned_tools);
@@ -647,22 +617,6 @@ fn add_tool_sources(context: &CoreToolPlanContext<'_>, planned_tools: &mut Plann
     for spec in hosted_model_tool_specs(context) {
         planned_tools.add_hosted_spec(spec);
     }
-}
-
-fn orchestrated_phase_has_no_tools(role: Option<&str>) -> bool {
-    matches!(
-        role,
-        Some(
-            TASK_CONTRACT_ROLE_NAME
-                | WORKER_PLAN_ROLE_NAME
-                | PLAN_REVIEW_ROLE_NAME
-                | RESULT_REVIEW_ROLE_NAME
-        )
-    )
-}
-
-fn orchestrated_phase_has_shell_only(role: Option<&str>) -> bool {
-    matches!(role, Some(EXPLORER_ROLE_NAME | PLAN_EVIDENCE_ROLE_NAME))
 }
 
 fn standalone_web_search_enabled(turn_context: &TurnContext) -> bool {
@@ -712,10 +666,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
 
             // Keep the legacy shell tool registered while unified exec is
             // model-visible.
-            planned_tools.add_arc(override_tool_exposure(
-                Arc::new(ShellCommandHandler::new(shell_command_options)),
-                ToolExposure::Hidden,
-            ));
+            planned_tools.add_dispatch_only(ShellCommandHandler::new(shell_command_options));
         }
         ConfigShellToolType::Disabled => {}
         ConfigShellToolType::Default
@@ -837,24 +788,6 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
 fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     let turn_context = context.step_context.turn.as_ref();
     if collab_tools_enabled(turn_context) {
-        if let Some(role) = turn_context.orchestrated_role {
-            if role == WORKER_ROLE_NAME && multi_agent_v2_enabled(turn_context) {
-                let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
-                    ToolExposure::DirectModelOnly
-                } else {
-                    ToolExposure::Direct
-                };
-                let tool_namespace = namespace_tools_enabled(turn_context)
-                    .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
-                    .flatten();
-                planned_tools.add_arc(override_tool_exposure(
-                    multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
-                    exposure,
-                ));
-            }
-            return;
-        }
-
         if multi_agent_v2_enabled(turn_context) {
             let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
                 ToolExposure::DirectModelOnly

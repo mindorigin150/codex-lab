@@ -36,12 +36,8 @@ pub(crate) fn mask_for_kind(
 pub(crate) fn next_mask(
     model_catalog: &ModelCatalog,
     current: Option<&CollaborationModeMask>,
-    orchestrated_enabled: bool,
 ) -> Option<CollaborationModeMask> {
-    let presets = filtered_presets(model_catalog)
-        .into_iter()
-        .filter(|mask| orchestrated_enabled || mask.mode != Some(ModeKind::Orchestrated))
-        .collect::<Vec<_>>();
+    let presets = filtered_presets(model_catalog);
     if presets.is_empty() {
         return None;
     }

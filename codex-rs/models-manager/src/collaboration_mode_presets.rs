@@ -1,5 +1,4 @@
 use codex_collaboration_mode_templates::DEFAULT as COLLABORATION_MODE_DEFAULT;
-use codex_collaboration_mode_templates::ORCHESTRATED as COLLABORATION_MODE_ORCHESTRATED;
 use codex_collaboration_mode_templates::PLAN as COLLABORATION_MODE_PLAN;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::ModeKind;
@@ -15,7 +14,7 @@ static COLLABORATION_MODE_DEFAULT_TEMPLATE: LazyLock<Template> = LazyLock::new(|
 });
 
 pub fn builtin_collaboration_mode_presets() -> Vec<CollaborationModeMask> {
-    vec![plan_preset(), orchestrated_preset(), default_preset()]
+    vec![plan_preset(), default_preset()]
 }
 
 fn plan_preset() -> CollaborationModeMask {
@@ -35,16 +34,6 @@ fn default_preset() -> CollaborationModeMask {
         model: None,
         reasoning_effort: None,
         developer_instructions: Some(Some(default_mode_instructions())),
-    }
-}
-
-fn orchestrated_preset() -> CollaborationModeMask {
-    CollaborationModeMask {
-        name: ModeKind::Orchestrated.display_name().to_string(),
-        mode: Some(ModeKind::Orchestrated),
-        model: None,
-        reasoning_effort: None,
-        developer_instructions: Some(Some(COLLABORATION_MODE_ORCHESTRATED.to_string())),
     }
 }
 

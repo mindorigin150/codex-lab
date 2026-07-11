@@ -322,7 +322,6 @@ impl AgentControl {
                     inheritance.environments,
                     inheritance.exec_policy,
                     options.environments.clone(),
-                    options.collaboration_mode.clone(),
                 ))
                 .await?
             }
@@ -578,7 +577,6 @@ impl AgentControl {
                 inherited_exec_policy,
                 options.environments.clone(),
                 thread_extension_init,
-                options.collaboration_mode.clone(),
             )
             .await
     }

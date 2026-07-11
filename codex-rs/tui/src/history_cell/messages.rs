@@ -2,62 +2,6 @@
 
 use super::*;
 
-fn shift_hyperlinks(line: &mut HyperlinkLine, offset: isize) {
-    for hyperlink in &mut line.hyperlinks {
-        hyperlink.columns = if offset.is_negative() {
-            let offset = offset.unsigned_abs();
-            hyperlink.columns.start - offset..hyperlink.columns.end - offset
-        } else {
-            let offset = offset as usize;
-            hyperlink.columns.start + offset..hyperlink.columns.end + offset
-        };
-    }
-}
-
-fn style_orchestrated_attribution(
-    line: &mut HyperlinkLine,
-    attribution: &crate::orchestrated_role::Attribution,
-) {
-    let Some(first_span) = line.line.spans.first() else {
-        return;
-    };
-    let first_span_style = first_span.style;
-    if let Some((role, remainder)) =
-        crate::orchestrated_role::packet_role_prefix(&first_span.content)
-    {
-        let trimmed_remainder = remainder.trim_start();
-        let protocol_prefix_width = first_span.content.width() - remainder.width();
-        let removed_width =
-            protocol_prefix_width + remainder[..remainder.len() - trimmed_remainder.len()].width();
-        let role_label = crate::orchestrated_role::role_label(role);
-        let has_separator = trimmed_remainder.len() != remainder.len();
-        let replacement_width =
-            role_label.width() + usize::from(!trimmed_remainder.is_empty() || has_separator);
-        let offset = replacement_width as isize - removed_width as isize;
-        let mut spans = vec![role_label];
-        if !trimmed_remainder.is_empty() || has_separator {
-            spans.push(" ".into());
-        }
-        if !trimmed_remainder.is_empty() {
-            spans.push(Span::styled(
-                trimmed_remainder.to_string(),
-                first_span_style,
-            ));
-        }
-        spans.extend(line.line.spans.iter().skip(1).cloned());
-        shift_hyperlinks(line, offset);
-        line.line.spans = spans;
-        return;
-    }
-
-    let crate::orchestrated_role::Attribution::OrchestratedRole(role) = attribution else {
-        return;
-    };
-    let role_label = crate::orchestrated_role::role_label(role);
-    shift_hyperlinks(line, (role_label.width() + 1) as isize);
-    line.line.spans.splice(0..0, [role_label, " ".into()]);
-}
-
 #[derive(Debug)]
 pub(crate) struct UserHistoryCell {
     pub message: String,
@@ -347,7 +291,6 @@ impl HistoryCell for ReasoningSummaryCell {
 pub(crate) struct AgentMessageCell {
     lines: Vec<HyperlinkLine>,
     is_first_line: bool,
-    attribution: crate::orchestrated_role::Attribution,
 }
 
 impl AgentMessageCell {
@@ -356,19 +299,13 @@ impl AgentMessageCell {
         Self {
             lines: plain_hyperlink_lines(lines),
             is_first_line,
-            attribution: crate::orchestrated_role::Attribution::Unattributed,
         }
     }
 
-    pub(crate) fn new_hyperlink_lines(
-        lines: Vec<HyperlinkLine>,
-        is_first_line: bool,
-        attribution: crate::orchestrated_role::Attribution,
-    ) -> Self {
+    pub(crate) fn new_hyperlink_lines(lines: Vec<HyperlinkLine>, is_first_line: bool) -> Self {
         Self {
             lines,
             is_first_line,
-            attribution,
         }
     }
 }
@@ -379,14 +316,8 @@ impl HistoryCell for AgentMessageCell {
     }
 
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        let mut lines = self.lines.clone();
-        if self.is_first_line
-            && let Some(first_line) = lines.first_mut()
-        {
-            style_orchestrated_attribution(first_line, &self.attribution);
-        }
         let mut wrapped = Vec::new();
-        for (index, line) in lines.iter().enumerate() {
+        for (index, line) in self.lines.iter().enumerate() {
             let initial_indent = if index == 0 && self.is_first_line {
                 "• ".dim().into()
             } else {
@@ -434,7 +365,6 @@ impl HistoryCell for AgentMessageCell {
 pub(crate) struct AgentMarkdownCell {
     markdown_source: String,
     cwd: PathBuf,
-    attribution: crate::orchestrated_role::Attribution,
 }
 
 impl AgentMarkdownCell {
@@ -444,22 +374,9 @@ impl AgentMarkdownCell {
     /// wrapped terminal lines. Passing rendered lines here would make future resize reflow preserve
     /// stale wrapping instead of repairing it.
     pub(crate) fn new(markdown_source: String, cwd: &Path) -> Self {
-        Self::new_with_attribution(
-            markdown_source,
-            cwd,
-            crate::orchestrated_role::Attribution::Unattributed,
-        )
-    }
-
-    pub(crate) fn new_with_attribution(
-        markdown_source: String,
-        cwd: &Path,
-        attribution: crate::orchestrated_role::Attribution,
-    ) -> Self {
         Self {
             markdown_source,
             cwd: cwd.to_path_buf(),
-            attribution,
         }
     }
 }
@@ -487,10 +404,6 @@ impl HistoryCell for AgentMarkdownCell {
             Some(wrap_width),
             Some(self.cwd.as_path()),
         );
-        let mut lines = lines;
-        if let Some(first_line) = lines.first_mut() {
-            style_orchestrated_attribution(first_line, &self.attribution);
-        }
         prefix_hyperlink_lines(lines, "• ".dim(), "  ".into())
     }
 
@@ -512,19 +425,13 @@ impl HistoryCell for AgentMarkdownCell {
 pub(crate) struct StreamingAgentTailCell {
     lines: Vec<HyperlinkLine>,
     is_first_line: bool,
-    attribution: crate::orchestrated_role::Attribution,
 }
 
 impl StreamingAgentTailCell {
-    pub(crate) fn new(
-        lines: Vec<HyperlinkLine>,
-        is_first_line: bool,
-        attribution: crate::orchestrated_role::Attribution,
-    ) -> Self {
+    pub(crate) fn new(lines: Vec<HyperlinkLine>, is_first_line: bool) -> Self {
         Self {
             lines,
             is_first_line,
-            attribution,
         }
     }
 }
@@ -537,14 +444,8 @@ impl HistoryCell for StreamingAgentTailCell {
     fn display_hyperlink_lines(&self, _width: u16) -> Vec<HyperlinkLine> {
         // Tail lines are already rendered at the controller's current stream width.
         // Re-wrapping them here can split table borders and produce malformed in-flight rows.
-        let mut source_lines = self.lines.clone();
-        if self.is_first_line
-            && let Some(first_line) = source_lines.first_mut()
-        {
-            style_orchestrated_attribution(first_line, &self.attribution);
-        }
         let mut lines = prefix_hyperlink_lines(
-            source_lines,
+            self.lines.clone(),
             if self.is_first_line {
                 "• ".dim()
             } else {

@@ -148,26 +148,6 @@ pub struct OrchestratorFeatureToml {
     pub enabled: Option<bool>,
 }
 
-/// Opt-in, routing, and budget settings for Orchestrated collaboration mode.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct OrchestratedModeToml {
-    /// Enables Orchestrated mode. Disabled unless explicitly opted in.
-    pub enabled: Option<bool>,
-    /// Allows TaskContract to bypass planning and review. Disabled by default.
-    pub direct_enabled: Option<bool>,
-    pub worker_model: Option<String>,
-    pub worker_reasoning_effort: Option<ReasoningEffort>,
-    pub explorer_model: Option<String>,
-    pub explorer_reasoning_effort: Option<ReasoningEffort>,
-    pub max_phase_steps: Option<usize>,
-    pub max_turn_model_requests: Option<usize>,
-    pub max_turn_tokens: Option<u64>,
-    pub max_turn_seconds: Option<u64>,
-    pub max_plan_revisions: Option<usize>,
-    pub max_work_revisions: Option<usize>,
-}
-
 /// Base config deserialized from ~/.codex/config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -374,7 +354,6 @@ pub struct ConfigToml {
 
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub plan_mode_reasoning_effort: Option<ReasoningEffort>,
-    pub orchestrated_mode: Option<OrchestratedModeToml>,
     pub model_reasoning_summary: Option<ReasoningSummary>,
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
     pub model_verbosity: Option<Verbosity>,

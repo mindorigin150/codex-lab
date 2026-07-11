@@ -27,13 +27,6 @@ use toml::Value as TomlValue;
 
 /// The role name used when a caller omits `agent_type`.
 pub const DEFAULT_ROLE_NAME: &str = "default";
-pub(crate) const WORKER_ROLE_NAME: &str = "worker";
-pub(crate) const EXPLORER_ROLE_NAME: &str = "explorer";
-pub(crate) const TASK_CONTRACT_ROLE_NAME: &str = "task-contract";
-pub(crate) const WORKER_PLAN_ROLE_NAME: &str = "worker-plan";
-pub(crate) const PLAN_REVIEW_ROLE_NAME: &str = "plan-review";
-pub(crate) const PLAN_EVIDENCE_ROLE_NAME: &str = "plan-evidence";
-pub(crate) const RESULT_REVIEW_ROLE_NAME: &str = "result-review";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
 
 /// Applies a named role layer to `config` while preserving caller-owned provider settings.
@@ -325,7 +318,7 @@ mod built_in {
                     }
                 ),
                 (
-                    EXPLORER_ROLE_NAME.to_string(),
+                    "explorer".to_string(),
                     AgentRoleConfig {
                         description: Some(r#"Use `explorer` for specific codebase questions.
 Explorers are fast and authoritative.
@@ -339,7 +332,7 @@ Rules:
                     }
                 ),
                 (
-                    WORKER_ROLE_NAME.to_string(),
+                    "worker".to_string(),
                     AgentRoleConfig {
                         description: Some(r#"Use for execution and production work.
 Typical tasks:
