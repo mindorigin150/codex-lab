@@ -2154,7 +2154,7 @@
     },
     "OrchestratedModeToml": {
       "additionalProperties": false,
-      "description": "Opt-in, routing, and budget settings for Orchestrated collaboration mode.",
+      "description": "Model routing defaults for Orchestrated collaboration mode.",
       "properties": {
         "direct_enabled": {
           "description": "Allows TaskContract to bypass planning and review. Disabled by default.",

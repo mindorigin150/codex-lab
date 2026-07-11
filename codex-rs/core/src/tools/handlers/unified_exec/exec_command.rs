@@ -224,7 +224,6 @@ impl ExecCommandHandler {
                         exit_code: Some(fact.exit_code()),
                         original_token_count: None,
                         output_omitted_bytes: None,
-                        output_artifact: None,
                         hook_command: None,
                     }));
                 }
@@ -252,7 +251,6 @@ impl ExecCommandHandler {
                 exit_code: Some(1),
                 original_token_count: None,
                 output_omitted_bytes: None,
-                output_artifact: None,
                 hook_command: None,
             }));
         }
