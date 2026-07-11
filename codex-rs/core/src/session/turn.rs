@@ -206,14 +206,29 @@ pub(crate) async fn run_turn(
     }
 
     track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
-
-    let mut last_agent_message: Option<String> = None;
-    let mut stop_hook_active = false;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
         TurnDiffTracker::with_environment_display_roots(display_roots),
     ));
+    let orchestrated_phases_ran = match super::orchestrated::run_for_input(
+        Arc::clone(&sess),
+        Arc::clone(&turn_context),
+        Arc::clone(&turn_extension_data),
+        Arc::clone(&turn_diff_tracker),
+        &input,
+        &mut client_session,
+        cancellation_token.child_token(),
+    )
+    .await?
+    {
+        super::orchestrated::Outcome::Skipped => false,
+        super::orchestrated::Outcome::Completed => true,
+        super::orchestrated::Outcome::Stopped => return Ok(None),
+    };
+
+    let mut last_agent_message: Option<String> = None;
+    let mut stop_hook_active = false;
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
@@ -222,7 +237,7 @@ pub(crate) async fn run_turn(
     // 1. At the start of a turn, so the fresh turn input in `input` gets sampled first.
     // 2. After auto-compact, when model/tool continuation needs to resume before any steer.
 
-    let mut next_step_context = Some(first_step_context);
+    let mut next_step_context = (!orchestrated_phases_ran).then_some(first_step_context);
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -235,6 +250,21 @@ pub(crate) async fn run_turn(
 
         if run_hooks_and_record_inputs(&sess, &turn_context, &pending_input).await {
             break;
+        }
+        match super::orchestrated::run_for_input(
+            Arc::clone(&sess),
+            Arc::clone(&turn_context),
+            Arc::clone(&turn_extension_data),
+            Arc::clone(&turn_diff_tracker),
+            &pending_input,
+            &mut client_session,
+            cancellation_token.child_token(),
+        )
+        .await?
+        {
+            super::orchestrated::Outcome::Skipped => {}
+            super::orchestrated::Outcome::Completed => {}
+            super::orchestrated::Outcome::Stopped => break,
         }
 
         let window_id = sess.current_window_id().await;
@@ -1110,7 +1140,7 @@ pub(crate) fn build_prompt(
         cwd = %step_context.turn.cwd.display()
     )
 )]
-async fn run_sampling_request(
+pub(super) async fn run_sampling_request(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
@@ -1142,13 +1172,14 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut original_input = None;
     loop {
-        let prompt_input = if let Some(input) = initial_input.take() {
+        let mut prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
             sess.clone_history()
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        super::orchestrated::add_sampling_instruction(turn_context.as_ref(), &mut prompt_input);
         let prompt = build_prompt(
             prompt_input,
             router.as_ref(),
@@ -1351,8 +1382,8 @@ pub(crate) async fn built_tools(
 }
 
 #[derive(Debug)]
-struct SamplingRequestResult {
-    needs_follow_up: bool,
+pub(super) struct SamplingRequestResult {
+    pub(super) needs_follow_up: bool,
     last_agent_message: Option<String>,
 }
 
@@ -1548,6 +1579,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::ContextCompacted(_)
         | EventMsg::ThreadRolledBack(_)
         | EventMsg::TurnStarted(_)
+        | EventMsg::OrchestratedRoleUpdated(_)
         | EventMsg::ThreadSettingsApplied(_)
         | EventMsg::TurnComplete(_)
         | EventMsg::TokenCount(_)

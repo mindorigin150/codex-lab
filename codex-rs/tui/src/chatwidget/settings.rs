@@ -606,6 +606,7 @@ impl ChatWidget {
         }
         match self.active_mode_kind() {
             ModeKind::Plan => Some(CollaborationModeIndicator::Plan),
+            ModeKind::Orchestrated => Some(CollaborationModeIndicator::Orchestrated),
             ModeKind::Default | ModeKind::PairProgramming | ModeKind::Execute => None,
         }
     }
@@ -672,12 +673,23 @@ impl ChatWidget {
         if let Some(next_mask) = collaboration_modes::next_mask(
             self.model_catalog.as_ref(),
             self.active_collaboration_mask.as_ref(),
+            self.config.orchestrated_mode.enabled,
         ) {
             self.set_collaboration_mask_from_user_action(next_mask);
         }
     }
 
-    pub(crate) fn set_collaboration_mask_from_user_action(&mut self, mask: CollaborationModeMask) {
+    pub(crate) fn set_collaboration_mask_from_user_action(
+        &mut self,
+        mut mask: CollaborationModeMask,
+    ) {
+        if mask.mode == Some(ModeKind::Orchestrated)
+            && !self.config.orchestrated_mode.enabled
+            && let Some(default_mask) =
+                collaboration_modes::default_mask(self.model_catalog.as_ref())
+        {
+            mask = default_mask;
+        }
         self.set_collaboration_mask(mask);
         self.submit_collaboration_mode_settings_update();
     }

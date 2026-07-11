@@ -207,6 +207,7 @@ mod input_queue;
 mod mcp;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+mod orchestrated;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
@@ -343,6 +344,7 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::LocalImagePreparation;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -446,6 +448,7 @@ pub(crate) struct CodexSpawnArgs {
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) external_time_provider: Option<Arc<dyn TimeProvider>>,
     pub(crate) inherited_multi_agent_version: Option<MultiAgentVersion>,
+    pub(crate) initial_collaboration_mode: Option<CollaborationMode>,
 }
 
 pub(crate) fn resolve_multi_agent_version(
@@ -534,6 +537,7 @@ impl Codex {
             attestation_provider,
             external_time_provider,
             inherited_multi_agent_version,
+            initial_collaboration_mode,
         } = args;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
@@ -626,14 +630,20 @@ impl Codex {
         };
         // TODO (aibrahim): Consolidate config.model and config.model_reasoning_effort into config.collaboration_mode
         // to avoid extracting these fields separately and constructing CollaborationMode here.
-        let collaboration_mode = CollaborationMode {
-            mode: ModeKind::Default,
-            settings: Settings {
-                model: model.clone(),
-                reasoning_effort: config.model_reasoning_effort.clone(),
-                developer_instructions: None,
-            },
-        };
+        let collaboration_mode = initial_collaboration_mode
+            .unwrap_or_else(|| CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: model.clone(),
+                    reasoning_effort: config.model_reasoning_effort.clone(),
+                    developer_instructions: None,
+                },
+            })
+            .with_updates(
+                Some(model.clone()),
+                Some(config.model_reasoning_effort.clone()),
+                /*developer_instructions*/ None,
+            );
         let fast_mode_enabled = config.features.enabled(Feature::FastMode);
         let initial_service_tier_warning = unsupported_service_tier_warning(
             config.service_tier.as_deref(),
@@ -1764,8 +1774,38 @@ impl Session {
             ));
     }
 
-    /// Persist the event to rollout and send it to clients.
+    /// Persist the event to rollout and send it to clients. Internal orchestrated
+    /// final or unknown-phase assistant output is excluded; commentary remains visible.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
+        let suppress_orchestrated_phase_message = turn_context.orchestrated_role.is_some()
+            && match &msg {
+                EventMsg::AgentMessage(event) => {
+                    !matches!(event.phase, Some(MessagePhase::Commentary))
+                }
+                EventMsg::AgentMessageContentDelta(_) => true,
+                EventMsg::ItemStarted(event) => match &event.item {
+                    TurnItem::AgentMessage(message) => {
+                        !matches!(message.phase, Some(MessagePhase::Commentary))
+                    }
+                    _ => false,
+                },
+                EventMsg::ItemCompleted(event) => match &event.item {
+                    TurnItem::AgentMessage(message) => {
+                        !matches!(message.phase, Some(MessagePhase::Commentary))
+                    }
+                    _ => false,
+                },
+                EventMsg::RawResponseItem(event) => matches!(
+                    &event.item,
+                    ResponseItem::Message { role, phase, .. }
+                        if role == "assistant"
+                            && !matches!(phase, Some(MessagePhase::Commentary))
+                ),
+                _ => false,
+            };
+        if suppress_orchestrated_phase_message {
+            return;
+        }
         let legacy_source = msg.clone();
         if let EventMsg::Error(error) = &legacy_source
             && error
@@ -1789,7 +1829,8 @@ impl Session {
             id: turn_context.sub_id.clone(),
             msg,
         };
-        self.send_event_raw(event).await;
+        let persist = turn_context.orchestrated_role.is_none();
+        self.send_event_raw_with_persistence(event, persist).await;
         self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
             .await;
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
@@ -1806,7 +1847,8 @@ impl Session {
                 id: turn_context.sub_id.clone(),
                 msg: legacy,
             };
-            self.send_event_raw(legacy_event).await;
+            self.send_event_raw_with_persistence(legacy_event, persist)
+                .await;
         }
     }
 
@@ -2831,8 +2873,44 @@ impl Session {
                 turn_context.model_info.truncation_policy.into(),
             );
         }
-        self.persist_rollout_response_items(items).await;
+        if turn_context.orchestrated_role.is_none() {
+            self.persist_rollout_response_items(items).await;
+        }
         self.send_raw_response_items(turn_context, items).await;
+    }
+
+    pub(crate) async fn replace_orchestrated_phase_history(
+        &self,
+        turn_context: &TurnContext,
+        mut baseline: Vec<ResponseItem>,
+        expected_phase_history: Vec<ResponseItem>,
+        packets: Vec<ResponseItem>,
+    ) {
+        let prepared_packet = self.prepare_conversation_items_for_history(turn_context, &packets);
+        let replaced = {
+            let mut state = self.state.lock().await;
+            let current = state.clone_history().into_raw_items();
+            if current.len() < expected_phase_history.len()
+                || current[..expected_phase_history.len()] != expected_phase_history
+            {
+                false
+            } else {
+                baseline.extend_from_slice(prepared_packet.as_ref());
+                // Preserve items queued after the captured phase suffix.
+                baseline.extend_from_slice(&current[expected_phase_history.len()..]);
+                let reference_context_item = state.reference_context_item();
+                state.replace_history(baseline, reference_context_item);
+                true
+            }
+        };
+        if replaced {
+            self.persist_rollout_response_items(prepared_packet.as_ref())
+                .await;
+        } else {
+            // A concurrent writer changed the prefix. Retain the raw phase rather than risk
+            // deleting steered input, and append only the bounded packet.
+            self.record_conversation_items(turn_context, &packets).await;
+        }
     }
 
     pub(crate) async fn record_step_world_state_if_changed(
@@ -3680,11 +3758,35 @@ impl Session {
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
     ) -> CodexResult<()> {
+        let role = turn_context.orchestrated_role.or_else(|| {
+            (turn_context.collaboration_mode.mode == ModeKind::Orchestrated)
+                .then_some("orchestrator")
+        });
+        self.record_token_usage_info_inner(turn_context, role, token_usage)
+            .await
+    }
+
+    async fn record_token_usage_info_inner(
+        &self,
+        turn_context: &TurnContext,
+        orchestrated_role: Option<&str>,
+        token_usage: Option<&TokenUsage>,
+    ) -> CodexResult<()> {
         if let Some(token_usage) = token_usage {
             let token_info = {
                 let mut state = self.state.lock().await;
-                state
-                    .update_token_info_from_usage(token_usage, turn_context.model_context_window());
+                match orchestrated_role {
+                    Some(role) => state.update_token_info_from_orchestrated_role_usage(
+                        role,
+                        turn_context.model_info.slug.as_str(),
+                        token_usage,
+                        turn_context.model_context_window(),
+                    ),
+                    None => state.update_token_info_from_usage(
+                        token_usage,
+                        turn_context.model_context_window(),
+                    ),
+                }
                 if matches!(
                     turn_context.config.model_auto_compact_token_limit_scope,
                     AutoCompactTokenLimitScope::BodyAfterPrefix
@@ -3724,6 +3826,7 @@ impl Session {
             let mut info = state.token_info().unwrap_or(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
+                orchestrated_role_token_usage: Vec::new(),
                 model_context_window: None,
             });
 
