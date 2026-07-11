@@ -2102,7 +2102,7 @@ impl TokenUsageInfo {
         if let Some(role_usage) = self
             .orchestrated_role_token_usage
             .iter_mut()
-            .find(|usage| usage.role == role)
+            .find(|usage| usage.role == role && usage.model == model)
         {
             role_usage.model = model.to_string();
             role_usage.token_usage.add_assign(usage);

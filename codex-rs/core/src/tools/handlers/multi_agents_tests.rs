@@ -4597,14 +4597,16 @@ async fn orchestrated_leaf_spawn_resolves_model_pair_without_nested_orchestratio
             &turn,
             &child_config,
             Some(crate::agent::role::WORKER_ROLE_NAME),
-        ),
-        None
+        )
+        .expect("typed child should receive an explicit mode")
+        .mode,
+        ModeKind::Default
     );
     assert_eq!(
         inherited_spawn_collaboration_mode(&turn, &child_config, /*agent_role*/ None)
-            .expect("untyped child should inherit orchestration")
+            .expect("child should receive an explicit mode")
             .mode,
-        ModeKind::Orchestrated
+        ModeKind::Default
     );
 }
 

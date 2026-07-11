@@ -4048,15 +4048,11 @@ async fn turn_context_with_model_updates_model_fields() {
 }
 
 #[tokio::test]
-async fn orchestrated_settings_update_applies_configured_orchestrator_defaults() {
+async fn orchestrated_settings_update_preserves_main_model_and_effort() {
     let (session, _turn_context, _rx_event) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
-        |config| {
-            config.orchestrated_mode.orchestrator_model = Some("gpt-5.4".to_string());
-            config.orchestrated_mode.orchestrator_reasoning_effort =
-                Some(ReasoningEffortConfig::Low);
-        },
+        |_| {},
     )
     .await;
     let current = session.collaboration_mode().await;
@@ -4078,8 +4074,8 @@ async fn orchestrated_settings_update_applies_configured_orchestrator_defaults()
         .expect("settings update");
 
     let updated = session.collaboration_mode().await;
-    assert_eq!(updated.model(), "gpt-5.4");
-    assert_eq!(updated.reasoning_effort(), Some(ReasoningEffortConfig::Low));
+    assert_eq!(updated.model(), current.model());
+    assert_eq!(updated.reasoning_effort(), current.reasoning_effort());
 }
 
 #[test]

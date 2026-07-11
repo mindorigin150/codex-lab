@@ -2156,17 +2156,49 @@
       "additionalProperties": false,
       "description": "Model routing defaults for Orchestrated collaboration mode.",
       "properties": {
+        "direct_enabled": {
+          "description": "Allows TaskContract to bypass planning and review. Disabled by default.",
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "Enables Orchestrated mode. Disabled unless explicitly opted in.",
+          "type": "boolean"
+        },
         "explorer_model": {
           "type": "string"
         },
         "explorer_reasoning_effort": {
           "$ref": "#/definitions/ReasoningEffort"
         },
-        "orchestrator_model": {
-          "type": "string"
+        "max_phase_steps": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
         },
-        "orchestrator_reasoning_effort": {
-          "$ref": "#/definitions/ReasoningEffort"
+        "max_plan_revisions": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_turn_model_requests": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_turn_seconds": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_turn_tokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_work_revisions": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
         },
         "worker_model": {
           "type": "string"

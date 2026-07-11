@@ -210,19 +210,19 @@ pub(crate) fn reject_full_fork_spawn_overrides(
 pub(crate) fn inherited_spawn_collaboration_mode(
     turn: &TurnContext,
     config: &Config,
-    agent_role: Option<&str>,
+    _agent_role: Option<&str>,
 ) -> Option<CollaborationMode> {
-    if turn.collaboration_mode.mode != ModeKind::Orchestrated
-        || matches!(agent_role, Some(EXPLORER_ROLE_NAME | WORKER_ROLE_NAME))
-    {
+    if turn.collaboration_mode.mode != ModeKind::Orchestrated {
         return None;
     }
 
-    Some(turn.collaboration_mode.with_updates(
+    let mut child_mode = turn.collaboration_mode.with_updates(
         config.model.clone(),
         Some(config.model_reasoning_effort.clone()),
-        Some(config.developer_instructions.clone()),
-    ))
+        Some(None),
+    );
+    child_mode.mode = ModeKind::Default;
+    Some(child_mode)
 }
 
 /// Resolves requested model settings with configured cheap defaults for orchestrated leaf agents.

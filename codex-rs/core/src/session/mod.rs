@@ -2883,17 +2883,34 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         mut baseline: Vec<ResponseItem>,
+        expected_phase_history: Vec<ResponseItem>,
         packets: Vec<ResponseItem>,
     ) {
         let prepared_packet = self.prepare_conversation_items_for_history(turn_context, &packets);
-        baseline.extend_from_slice(prepared_packet.as_ref());
-        {
+        let replaced = {
             let mut state = self.state.lock().await;
-            let reference_context_item = state.reference_context_item();
-            state.replace_history(baseline, reference_context_item);
+            let current = state.clone_history().into_raw_items();
+            if current.len() < expected_phase_history.len()
+                || current[..expected_phase_history.len()] != expected_phase_history
+            {
+                false
+            } else {
+                baseline.extend_from_slice(prepared_packet.as_ref());
+                // Preserve items queued after the captured phase suffix.
+                baseline.extend_from_slice(&current[expected_phase_history.len()..]);
+                let reference_context_item = state.reference_context_item();
+                state.replace_history(baseline, reference_context_item);
+                true
+            }
+        };
+        if replaced {
+            self.persist_rollout_response_items(prepared_packet.as_ref())
+                .await;
+        } else {
+            // A concurrent writer changed the prefix. Retain the raw phase rather than risk
+            // deleting steered input, and append only the bounded packet.
+            self.record_conversation_items(turn_context, &packets).await;
         }
-        self.persist_rollout_response_items(prepared_packet.as_ref())
-            .await;
     }
 
     pub(crate) async fn record_step_world_state_if_changed(

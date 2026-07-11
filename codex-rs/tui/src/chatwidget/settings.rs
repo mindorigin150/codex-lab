@@ -673,12 +673,23 @@ impl ChatWidget {
         if let Some(next_mask) = collaboration_modes::next_mask(
             self.model_catalog.as_ref(),
             self.active_collaboration_mask.as_ref(),
+            self.config.orchestrated_mode.enabled,
         ) {
             self.set_collaboration_mask_from_user_action(next_mask);
         }
     }
 
-    pub(crate) fn set_collaboration_mask_from_user_action(&mut self, mask: CollaborationModeMask) {
+    pub(crate) fn set_collaboration_mask_from_user_action(
+        &mut self,
+        mut mask: CollaborationModeMask,
+    ) {
+        if mask.mode == Some(ModeKind::Orchestrated)
+            && !self.config.orchestrated_mode.enabled
+            && let Some(default_mask) =
+                collaboration_modes::default_mask(self.model_catalog.as_ref())
+        {
+            mask = default_mask;
+        }
         self.set_collaboration_mask(mask);
         self.submit_collaboration_mode_settings_update();
     }
@@ -698,19 +709,6 @@ impl ChatWidget {
             && let Some(effort) = self.config.plan_mode_reasoning_effort.clone()
         {
             mask.reasoning_effort = Some(Some(effort));
-        }
-        if mask.mode == Some(ModeKind::Orchestrated) {
-            if let Some(model) = self.config.orchestrated_mode.orchestrator_model.clone() {
-                mask.model = Some(model);
-            }
-            if let Some(effort) = self
-                .config
-                .orchestrated_mode
-                .orchestrator_reasoning_effort
-                .clone()
-            {
-                mask.reasoning_effort = Some(Some(effort));
-            }
         }
         if mask.mode == Some(ModeKind::Plan) {
             self.dismissed_plan_mode_nudge_scopes

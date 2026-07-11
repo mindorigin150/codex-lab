@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use crate::agent::role::EXPLORER_ROLE_NAME;
 use crate::agent::role::PLAN_EVIDENCE_ROLE_NAME;
@@ -21,6 +22,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::OrchestratedRoleUpdatedEvent;
@@ -33,9 +36,6 @@ use super::session::Session;
 use super::turn::run_sampling_request;
 use super::turn_context::TurnContext;
 
-const MAX_PLAN_REVISIONS: usize = 2;
-const MAX_WORK_REVISIONS: usize = 2;
-const MAX_PHASE_STEPS: usize = 32;
 const MAX_PLAN_EVIDENCE_PACKET_TOKENS: usize = 1_000;
 // Prompts target 2 KiB packets. Keep a larger hard ceiling so small model-side
 // budget misses do not throw away useful evidence or exhaust review retries.
@@ -68,11 +68,51 @@ struct PhasePacket {
     execution_facts: OrchestratedExecutionFacts,
 }
 
+struct TurnBudget {
+    requests: usize,
+    start_tokens: i64,
+    max_requests: usize,
+    max_tokens: u64,
+    max_phase_steps: usize,
+}
+
+impl TurnBudget {
+    fn claim_request(&mut self) -> CodexResult<()> {
+        if self.requests >= self.max_requests {
+            return Err(CodexErr::SessionBudgetExceeded);
+        }
+        self.requests += 1;
+        Ok(())
+    }
+
+    async fn check_tokens(&self, sess: &Session) -> CodexResult<()> {
+        let current_tokens = sess
+            .total_token_usage()
+            .await
+            .map_or(self.start_tokens, |usage| usage.total_tokens);
+        let used_tokens = current_tokens.saturating_sub(self.start_tokens) as u64;
+        if used_tokens > self.max_tokens {
+            Err(CodexErr::SessionBudgetExceeded)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum WorkerStatus {
     Complete,
     Incomplete,
     Invalid,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PhaseStatus {
+    Direct,
+    Approved,
+    EvidenceNeeded,
+    WorkerComplete,
+    WorkerIncomplete,
 }
 
 impl Phase {
@@ -163,26 +203,54 @@ pub(super) async fn run_for_input(
     if turn_context.collaboration_mode.mode != ModeKind::Orchestrated || !starts_orchestrated_flow {
         return Ok(Outcome::Skipped);
     }
+    if input
+        .iter()
+        .any(|input_item| matches!(input_item, TurnInput::UserInput { .. }))
+    {
+        turn_context
+            .orchestrated_execution_ledger
+            .lock()
+            .await
+            .invalidate();
+    }
     turn_context
         .orchestrated_execution_approved
         .store(false, Ordering::Relaxed);
 
-    match run_phases(
-        Arc::clone(&sess),
-        Arc::clone(&turn_context),
-        turn_extension_data,
-        turn_diff_tracker,
-        client_session,
-        cancellation_token,
+    let max_turn_seconds = turn_context.config.orchestrated_mode.max_turn_seconds;
+    let phase_result = tokio::time::timeout(
+        Duration::from_secs(max_turn_seconds),
+        run_phases(
+            Arc::clone(&sess),
+            Arc::clone(&turn_context),
+            turn_extension_data,
+            turn_diff_tracker,
+            client_session,
+            cancellation_token,
+        ),
     )
-    .await
-    {
-        Ok(()) => Ok(Outcome::Completed),
-        Err(err @ CodexErr::TurnAborted) => {
+    .await;
+    match phase_result {
+        Ok(Ok(true)) => Ok(Outcome::Completed),
+        Ok(Ok(false)) => {
+            append_blocked_packet(&sess, &turn_context, "review gate was not approved").await;
+            Ok(Outcome::Completed)
+        }
+        Err(_) => {
+            emit_role_update(&sess, &turn_context, None).await;
+            append_blocked_packet(&sess, &turn_context, "turn time budget exhausted").await;
+            Ok(Outcome::Completed)
+        }
+        Ok(Err(CodexErr::SessionBudgetExceeded)) => {
+            emit_role_update(&sess, &turn_context, None).await;
+            append_blocked_packet(&sess, &turn_context, "request or token budget exhausted").await;
+            Ok(Outcome::Completed)
+        }
+        Ok(Err(err @ CodexErr::TurnAborted)) => {
             emit_role_update(&sess, &turn_context, None).await;
             Err(err)
         }
-        Err(err) => {
+        Ok(Err(err)) => {
             info!("Orchestrated internal phase error: {err:#}");
             emit_role_update(&sess, &turn_context, None).await;
             let error = err.to_codex_protocol_error();
@@ -196,6 +264,21 @@ pub(super) async fn run_for_input(
     }
 }
 
+async fn append_blocked_packet(sess: &Session, turn_context: &TurnContext, reason: &str) {
+    let item = ResponseItem::Message {
+        id: None,
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: format!(
+                "orchestrator-gate: blocked\nreason: {reason}\nDo not claim completion. Report the blocker and verified partial progress."
+            ),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    sess.record_conversation_items(turn_context, &[item]).await;
+}
+
 async fn run_phases(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
@@ -203,7 +286,19 @@ async fn run_phases(
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
     cancellation_token: CancellationToken,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
+    let config = &turn_context.config.orchestrated_mode;
+    let start_tokens = sess
+        .total_token_usage()
+        .await
+        .map_or(0, |usage| usage.total_tokens);
+    let mut budget = TurnBudget {
+        requests: 0,
+        start_tokens,
+        max_requests: config.max_turn_model_requests,
+        max_tokens: config.max_turn_tokens,
+        max_phase_steps: config.max_phase_steps,
+    };
     let task_contract = run_phase(
         Arc::clone(&sess),
         Arc::clone(&turn_context),
@@ -211,17 +306,20 @@ async fn run_phases(
         Arc::clone(&turn_diff_tracker),
         Phase::TaskContract,
         client_session,
+        &mut budget,
         cancellation_token.child_token(),
     )
     .await?;
-    if !task_contract.truncated
-        && packet_has_status(&task_contract.text, TASK_CONTRACT_ROLE_NAME, "direct")
+    if config.direct_enabled
+        && !task_contract.truncated
+        && phase_status(&task_contract.text, Phase::TaskContract) == Some(PhaseStatus::Direct)
     {
         turn_context
             .orchestrated_execution_approved
             .store(true, Ordering::Relaxed);
         let mut previous_retry_signature = None;
-        for _ in 0..=MAX_WORK_REVISIONS {
+        let mut result_approved = false;
+        for _ in 0..=config.max_work_revisions {
             let worker_packet = run_phase(
                 Arc::clone(&sess),
                 Arc::clone(&turn_context),
@@ -229,12 +327,29 @@ async fn run_phases(
                 Arc::clone(&turn_diff_tracker),
                 Phase::WorkerExec,
                 client_session,
+                &mut budget,
                 cancellation_token.child_token(),
             )
             .await?;
             let worker_status = worker_status(&worker_packet.text);
             if !worker_packet.truncated && worker_status == WorkerStatus::Complete {
-                break;
+                let review_packet = run_phase(
+                    Arc::clone(&sess),
+                    Arc::clone(&turn_context),
+                    Arc::clone(&turn_extension_data),
+                    Arc::clone(&turn_diff_tracker),
+                    Phase::ResultReview,
+                    client_session,
+                    &mut budget,
+                    cancellation_token.child_token(),
+                )
+                .await?;
+                if !review_packet.truncated
+                    && review_approved(&review_packet.text, RESULT_REVIEW_ROLE_NAME)
+                {
+                    result_approved = true;
+                    break;
+                }
             }
             if !worker_packet.truncated
                 && worker_status == WorkerStatus::Incomplete
@@ -250,6 +365,7 @@ async fn run_phases(
                     Arc::clone(&turn_diff_tracker),
                     Phase::Explorer,
                     client_session,
+                    &mut budget,
                     cancellation_token.child_token(),
                 )
                 .await?;
@@ -266,7 +382,7 @@ async fn run_phases(
             previous_retry_signature = Some(retry_signature);
         }
         emit_role_update(&sess, &turn_context, None).await;
-        return Ok(());
+        return Ok(result_approved);
     }
 
     let _ = run_phase(
@@ -276,11 +392,13 @@ async fn run_phases(
         Arc::clone(&turn_diff_tracker),
         Phase::Explorer,
         client_session,
+        &mut budget,
         cancellation_token.child_token(),
     )
     .await?;
 
-    for _ in 0..=MAX_PLAN_REVISIONS {
+    let mut result_approved = false;
+    for _ in 0..=config.max_plan_revisions {
         let worker_plan = run_phase(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
@@ -288,6 +406,7 @@ async fn run_phases(
             Arc::clone(&turn_diff_tracker),
             Phase::WorkerPlan,
             client_session,
+            &mut budget,
             cancellation_token.child_token(),
         )
         .await?;
@@ -301,6 +420,7 @@ async fn run_phases(
                 Arc::clone(&turn_diff_tracker),
                 Phase::PlanReview,
                 client_session,
+                &mut budget,
                 cancellation_token.child_token(),
             )
             .await?;
@@ -317,6 +437,7 @@ async fn run_phases(
                 Arc::clone(&turn_diff_tracker),
                 Phase::PlanEvidence,
                 client_session,
+                &mut budget,
                 cancellation_token.child_token(),
             )
             .await?;
@@ -332,7 +453,7 @@ async fn run_phases(
                 .orchestrated_execution_approved
                 .store(true, Ordering::Relaxed);
             let mut previous_retry_signature = None;
-            for _ in 0..=MAX_WORK_REVISIONS {
+            for _ in 0..=config.max_work_revisions {
                 let worker_packet = run_phase(
                     Arc::clone(&sess),
                     Arc::clone(&turn_context),
@@ -340,6 +461,7 @@ async fn run_phases(
                     Arc::clone(&turn_diff_tracker),
                     Phase::WorkerExec,
                     client_session,
+                    &mut budget,
                     cancellation_token.child_token(),
                 )
                 .await?;
@@ -354,6 +476,7 @@ async fn run_phases(
                     Arc::clone(&turn_diff_tracker),
                     Phase::ResultReview,
                     client_session,
+                    &mut budget,
                     cancellation_token.child_token(),
                 )
                 .await?;
@@ -361,6 +484,7 @@ async fn run_phases(
                     && !review_packet.truncated
                     && review_approved(&review_packet.text, RESULT_REVIEW_ROLE_NAME)
                 {
+                    result_approved = true;
                     break;
                 }
                 match correction_owner(&review_packet.text) {
@@ -379,6 +503,7 @@ async fn run_phases(
                             Arc::clone(&turn_diff_tracker),
                             Phase::Explorer,
                             client_session,
+                            &mut budget,
                             cancellation_token.child_token(),
                         )
                         .await?;
@@ -395,7 +520,7 @@ async fn run_phases(
     }
     emit_role_update(&sess, &turn_context, None).await;
 
-    Ok(())
+    Ok(result_approved)
 }
 
 fn retry_signature(worker_packet: &PhasePacket, review_packet: &PhasePacket) -> String {
@@ -423,7 +548,8 @@ enum CorrectionOwner {
 
 fn correction_owner(packet: &str) -> Option<CorrectionOwner> {
     let mut lines = packet.lines();
-    if !packet_has_status(lines.next()?, RESULT_REVIEW_ROLE_NAME, "revise") {
+    let status_line = lines.next()?;
+    if parse_status_token(status_line, Phase::ResultReview) != Some("revise") {
         return None;
     }
     match lines.next()?.trim() {
@@ -436,11 +562,16 @@ fn correction_owner(packet: &str) -> Option<CorrectionOwner> {
 }
 
 fn review_approved(packet: &str, role: &str) -> bool {
-    packet_has_status(packet, role, "approved")
+    let phase = match role {
+        PLAN_REVIEW_ROLE_NAME => Phase::PlanReview,
+        RESULT_REVIEW_ROLE_NAME => Phase::ResultReview,
+        _ => return false,
+    };
+    phase_status(packet, phase) == Some(PhaseStatus::Approved)
 }
 
 fn review_requests_evidence(packet: &str) -> bool {
-    packet_has_status(packet, PLAN_REVIEW_ROLE_NAME, "evidence-needed")
+    phase_status(packet, Phase::PlanReview) == Some(PhaseStatus::EvidenceNeeded)
 }
 
 fn worker_status(packet: &str) -> WorkerStatus {
@@ -448,32 +579,51 @@ fn worker_status(packet: &str) -> WorkerStatus {
         .strip_prefix("orc:")
         .map(str::trim_start)
         .unwrap_or(packet);
-    if packet_has_status(packet, WORKER_ROLE_NAME, "complete") {
-        WorkerStatus::Complete
-    } else if packet_has_status(packet, WORKER_ROLE_NAME, "incomplete") {
-        WorkerStatus::Incomplete
-    } else {
-        WorkerStatus::Invalid
+    match phase_status(packet, Phase::WorkerExec) {
+        Some(PhaseStatus::WorkerComplete) => WorkerStatus::Complete,
+        Some(PhaseStatus::WorkerIncomplete) => WorkerStatus::Incomplete,
+        _ => WorkerStatus::Invalid,
     }
 }
 
-fn packet_has_status(packet: &str, role: &str, status: &str) -> bool {
-    let Some(result) = packet.strip_prefix(&format!("{role}:")) else {
-        return false;
+fn phase_status(packet: &str, phase: Phase) -> Option<PhaseStatus> {
+    match (phase, parse_status_token(packet.lines().next()?, phase)?) {
+        (Phase::TaskContract, "direct") => Some(PhaseStatus::Direct),
+        (Phase::PlanReview | Phase::ResultReview, "approved") => Some(PhaseStatus::Approved),
+        (Phase::PlanReview, "evidence-needed") => Some(PhaseStatus::EvidenceNeeded),
+        (Phase::WorkerExec, "complete") => Some(PhaseStatus::WorkerComplete),
+        (Phase::WorkerExec, "incomplete") => Some(PhaseStatus::WorkerIncomplete),
+        _ => None,
+    }
+}
+
+fn parse_status_token(line: &str, phase: Phase) -> Option<&str> {
+    let line = if phase == Phase::WorkerExec {
+        line.strip_prefix("orc:")
+            .map(str::trim_start)
+            .unwrap_or(line)
+    } else {
+        line
     };
-    let result = result.trim_start();
-    let Some(remainder) = result.strip_prefix(status) else {
-        return false;
-    };
-    remainder
-        .chars()
-        .next()
-        .is_none_or(|next| next.is_whitespace() || matches!(next, ';' | ':'))
+    let remainder = line
+        .strip_prefix(phase.name())?
+        .strip_prefix(':')?
+        .trim_start();
+    let end = remainder
+        .find(|character: char| character.is_whitespace() || matches!(character, ';' | ':'))
+        .unwrap_or(remainder.len());
+    let token = &remainder[..end];
+    (!token.is_empty()).then_some(token)
 }
 
 pub(super) fn add_sampling_instruction(turn_context: &TurnContext, input: &mut Vec<ResponseItem>) {
     if let Some(phase) = turn_context.orchestrated_role.and_then(Phase::from_name) {
         input.push(developer_instruction_item(phase.prompt()));
+        if phase == Phase::TaskContract && !turn_context.config.orchestrated_mode.direct_enabled {
+            input.push(developer_instruction_item(
+                "Direct routing is disabled. Emit a normal `task-contract:` packet and never emit `task-contract: direct`.",
+            ));
+        }
         return;
     }
     if turn_context.collaboration_mode.mode == ModeKind::Orchestrated {
@@ -498,6 +648,7 @@ fn developer_instruction_item(text: &str) -> ResponseItem {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_phase(
     sess: Arc<Session>,
     root_turn_context: Arc<TurnContext>,
@@ -505,6 +656,7 @@ async fn run_phase(
     turn_diff_tracker: SharedTurnDiffTracker,
     phase: Phase,
     client_session: &mut ModelClientSession,
+    budget: &mut TurnBudget,
     cancellation_token: CancellationToken,
 ) -> CodexResult<PhasePacket> {
     let history_baseline = sess.clone_history().await.into_raw_items();
@@ -522,7 +674,16 @@ async fn run_phase(
     role_turn_context.final_output_json_schema = None;
     if matches!(phase, Phase::Explorer | Phase::PlanEvidence) {
         role_turn_context.approval_policy = Constrained::allow_only(AskForApproval::Never);
-        role_turn_context.permission_profile = PermissionProfile::read_only();
+        let mut read_only_file_system = FileSystemSandboxPolicy::read_only();
+        read_only_file_system.preserve_deny_read_restrictions_from(
+            &root_turn_context
+                .permission_profile
+                .file_system_sandbox_policy(),
+        );
+        role_turn_context.permission_profile = PermissionProfile::from_runtime_permissions(
+            &read_only_file_system,
+            NetworkSandboxPolicy::Restricted,
+        );
     }
     if let Some(reasoning_effort) = phase.reasoning_effort_override(&root_turn_context) {
         role_turn_context.reasoning_effort = Some(reasoning_effort);
@@ -534,7 +695,8 @@ async fn run_phase(
     }
     let role_turn_context = Arc::new(role_turn_context);
     let mut phase_result = Ok(());
-    for _ in 0..MAX_PHASE_STEPS {
+    for _ in 0..budget.max_phase_steps {
+        budget.claim_request()?;
         let step_context = sess
             .capture_step_context(Arc::clone(&role_turn_context))
             .await;
@@ -559,6 +721,7 @@ async fn run_phase(
             cancellation_token.child_token(),
         )
         .await;
+        budget.check_tokens(sess.as_ref()).await?;
         match sampling_result {
             Ok((sampling_result, _)) if sampling_result.needs_follow_up => {}
             Ok(_) => break,
@@ -623,7 +786,7 @@ async fn compact_phase_history(
     if let Some(execution_facts_update) = execution_facts_update {
         retained_items.push(ContextualUserFragment::into(execution_facts_update));
     }
-    sess.replace_orchestrated_phase_history(turn_context, baseline, retained_items)
+    sess.replace_orchestrated_phase_history(turn_context, baseline, after_items, retained_items)
         .await;
     PhasePacket {
         execution_facts,

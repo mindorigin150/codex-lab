@@ -924,7 +924,7 @@ impl ChatWidget {
                     .clone()
                     .or(current_effort),
             ),
-            Some("explorer") => (
+            Some("explorer" | "plan-evidence") => (
                 self.config
                     .orchestrated_mode
                     .explorer_model

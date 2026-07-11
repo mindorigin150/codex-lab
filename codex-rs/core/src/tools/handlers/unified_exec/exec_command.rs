@@ -434,14 +434,18 @@ impl ExecCommandHandler {
             Ok(response) => {
                 if let (Some((generation, command_key)), Some(exit_code)) =
                     (command_attempt, response.exit_code)
-                    && exit_code != 0
                 {
-                    turn.orchestrated_execution_ledger.lock().await.record_exit(
-                        generation,
-                        command_key,
-                        exit_code,
-                        &response.raw_output,
-                    );
+                    let mut ledger = turn.orchestrated_execution_ledger.lock().await;
+                    if exit_code == 0 {
+                        ledger.invalidate();
+                    } else {
+                        ledger.record_exit(
+                            generation,
+                            command_key,
+                            exit_code,
+                            &response.raw_output,
+                        );
+                    }
                 }
                 Ok(boxed_tool_output(response))
             }
