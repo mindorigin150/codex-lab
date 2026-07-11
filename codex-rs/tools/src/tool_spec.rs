@@ -60,6 +60,20 @@ impl ToolSpec {
             ToolSpec::Freeform(tool) => tool.name.as_str(),
         }
     }
+
+    /// Returns whether any input parameter in this tool is encrypted.
+    pub fn contains_encrypted(&self) -> bool {
+        match self {
+            ToolSpec::Function(tool) => tool.parameters.contains_encrypted(),
+            ToolSpec::Namespace(namespace) => namespace.tools.iter().any(|tool| match tool {
+                crate::ResponsesApiNamespaceTool::Function(tool) => {
+                    tool.parameters.contains_encrypted()
+                }
+            }),
+            ToolSpec::ToolSearch { parameters, .. } => parameters.contains_encrypted(),
+            ToolSpec::WebSearch { .. } | ToolSpec::Freeform(_) => false,
+        }
+    }
 }
 
 impl From<LoadableToolSpec> for ToolSpec {

@@ -29,6 +29,40 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
 
 impl CoreToolRuntime for TestHandler {}
 
+struct EncryptedTestHandler {
+    tool_name: codex_tools::ToolName,
+}
+
+impl ToolExecutor<ToolInvocation> for EncryptedTestHandler {
+    fn tool_name(&self) -> codex_tools::ToolName {
+        self.tool_name.clone()
+    }
+
+    fn spec(&self) -> codex_tools::ToolSpec {
+        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+            name: self.tool_name.name.clone(),
+            description: "Encrypted test tool.".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: codex_tools::JsonSchema::object(
+                std::collections::BTreeMap::from([(
+                    "message".to_string(),
+                    codex_tools::JsonSchema::string(None).with_encrypted(),
+                )]),
+                Some(vec!["message".to_string()]),
+                Some(false.into()),
+            ),
+            output_schema: None,
+        })
+    }
+
+    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        panic!("encrypted tool handler must not run from Code Mode")
+    }
+}
+
+impl CoreToolRuntime for EncryptedTestHandler {}
+
 #[derive(Clone)]
 enum LifecycleTestResult {
     Ok { success: bool },
@@ -302,6 +336,35 @@ async fn code_mode_wait_does_not_expose_default_hook_payloads() {
     );
     assert_eq!(wait.pre_tool_use_payload(&wait_invocation), None);
     assert_eq!(wait.post_tool_use_payload(&wait_invocation, &output), None);
+}
+
+#[tokio::test]
+async fn code_mode_rejects_tools_with_encrypted_parameters_before_dispatch() {
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    let tool_name = codex_tools::ToolName::plain("encrypted_tool");
+    let handler = Arc::new(EncryptedTestHandler {
+        tool_name: tool_name.clone(),
+    }) as Arc<dyn CoreToolRuntime>;
+    let registry = ToolRegistry::new(HashMap::from([(tool_name.clone(), handler)]));
+    let mut invocation = test_invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "encrypted-call",
+        tool_name,
+    );
+    invocation.source = crate::tools::context::ToolCallSource::CodeMode {
+        cell_id: "cell-1".to_string(),
+        runtime_tool_call_id: "tool-1".to_string(),
+    };
+
+    let err = match registry.dispatch_any(invocation).await {
+        Ok(_) => panic!("encrypted Code Mode call should be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        err.to_string(),
+        "tools with encrypted parameters cannot be called from Code Mode"
+    );
 }
 
 #[tokio::test]

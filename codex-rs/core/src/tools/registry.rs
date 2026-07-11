@@ -14,6 +14,7 @@ use crate::sandbox_tags::permission_profile_policy_tag;
 use crate::sandbox_tags::permission_profile_sandbox_tag;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
+use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -459,6 +460,16 @@ impl ToolRegistry {
                 return Err(err);
             }
         };
+
+        if matches!(invocation.source, ToolCallSource::CodeMode { .. })
+            && tool.spec().contains_encrypted()
+        {
+            let err = FunctionCallError::RespondToModel(
+                "tools with encrypted parameters cannot be called from Code Mode".to_string(),
+            );
+            dispatch_trace.record_failed(&err);
+            return Err(err);
+        }
 
         let telemetry_tags = tool.telemetry_tags(&invocation).await;
         let mut tool_result_tags =

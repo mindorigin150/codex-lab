@@ -1313,6 +1313,10 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
                 .and_then(|schema| schema.encrypted),
             Some(true)
         );
+        assert_eq!(
+            plan.exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, tool_name).to_string()),
+            ToolExposure::DirectModelOnly
+        );
     }
 }
 

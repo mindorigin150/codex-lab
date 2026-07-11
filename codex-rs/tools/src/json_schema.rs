@@ -120,6 +120,30 @@ impl JsonSchema {
         self
     }
 
+    /// Returns whether this schema or any nested schema marks encrypted input.
+    pub fn contains_encrypted(&self) -> bool {
+        self.encrypted == Some(true)
+            || self.items.as_deref().is_some_and(Self::contains_encrypted)
+            || self
+                .properties
+                .as_ref()
+                .is_some_and(|properties| properties.values().any(Self::contains_encrypted))
+            || match &self.additional_properties {
+                Some(AdditionalProperties::Schema(schema)) => schema.contains_encrypted(),
+                _ => false,
+            }
+            || [&self.any_of, &self.one_of, &self.all_of]
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(Self::contains_encrypted)
+            || [&self.defs, &self.definitions]
+                .into_iter()
+                .flatten()
+                .flat_map(|definitions| definitions.values())
+                .any(Self::contains_encrypted)
+    }
+
     pub fn number(description: Option<String>) -> Self {
         Self::typed(JsonSchemaPrimitiveType::Number, description)
     }

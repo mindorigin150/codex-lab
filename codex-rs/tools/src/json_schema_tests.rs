@@ -39,6 +39,31 @@ fn json_schema_serializes_encrypted_marker() {
 }
 
 #[test]
+fn contains_encrypted_finds_nested_schema_marker() {
+    let schema = JsonSchema::object(
+        BTreeMap::from([(
+            "messages".to_string(),
+            JsonSchema::array(
+                JsonSchema::object(
+                    BTreeMap::from([(
+                        "content".to_string(),
+                        JsonSchema::string(None).with_encrypted(),
+                    )]),
+                    None,
+                    None,
+                ),
+                None,
+            ),
+        )]),
+        None,
+        None,
+    );
+
+    assert!(schema.contains_encrypted());
+    assert!(!JsonSchema::string(None).contains_encrypted());
+}
+
+#[test]
 fn parse_tool_input_schema_infers_object_shape_and_defaults_properties() {
     // Example schema shape:
     // {

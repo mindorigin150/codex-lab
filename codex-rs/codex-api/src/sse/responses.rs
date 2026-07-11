@@ -398,8 +398,10 @@ pub fn process_responses_event(
                     } else if is_cyber_policy_error(&error) {
                         let message = cyber_policy_message(error.message);
                         response_error = ApiError::CyberPolicy { message };
-                    } else if matches!(error.code.as_deref(), Some("invalid_prompt" | "bio_policy"))
-                    {
+                    } else if matches!(
+                        error.code.as_deref(),
+                        Some("invalid_prompt" | "bio_policy" | "invalid_encrypted_content")
+                    ) {
                         let message = error
                             .message
                             .unwrap_or_else(|| "Invalid request.".to_string());
@@ -1073,7 +1075,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_policy_errors_without_type_are_invalid_requests() {
+    async fn non_retryable_request_errors_without_type_are_invalid_requests() {
         for (code, expected_message) in [
             (
                 "invalid_prompt",
@@ -1082,6 +1084,10 @@ mod tests {
             (
                 "bio_policy",
                 "This content was flagged for possible biological risk.",
+            ),
+            (
+                "invalid_encrypted_content",
+                "The encrypted tool argument is invalid.",
             ),
         ] {
             let raw_error = json!({
