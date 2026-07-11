@@ -3,6 +3,7 @@ use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::OrchestratorFeatureToml;
 use codex_config::config_toml::OrchestratorToml;
+use codex_config::config_toml::ToolOutputSpillToml;
 use codex_config::types::MemoriesToml;
 use codex_features::CurrentTimeReminderConfigToml;
 use codex_features::Feature;
@@ -141,6 +142,14 @@ fn save_config_resolved_fields(
         Some(config.include_collaboration_mode_instructions);
     lock_config.include_environment_context = Some(config.include_environment_context);
     lock_config.background_terminal_max_timeout = Some(config.background_terminal_max_timeout);
+    lock_config.tool_output_spill = Some(ToolOutputSpillToml {
+        enabled: Some(config.tool_output_spill.enabled),
+        token_threshold: Some(config.tool_output_spill.token_threshold),
+        preview_token_limit: Some(config.tool_output_spill.preview_token_limit),
+        max_artifact_bytes: Some(config.tool_output_spill.max_artifact_bytes),
+        max_store_bytes: Some(config.tool_output_spill.max_store_bytes),
+        retention_days: Some(config.tool_output_spill.retention_days),
+    });
 
     // Feature aliases and feature configs need to be written in their resolved
     // form; otherwise replay can drift when a legacy key maps to the same

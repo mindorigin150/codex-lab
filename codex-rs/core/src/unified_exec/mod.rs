@@ -46,6 +46,7 @@ use crate::tools::network_approval::DeferredNetworkApproval;
 mod async_watcher;
 mod errors;
 mod head_tail_buffer;
+mod output_artifact;
 mod process;
 mod process_manager;
 mod process_state;
@@ -55,6 +56,11 @@ pub(crate) fn set_deterministic_process_ids_for_tests(enabled: bool) {
 }
 
 pub(crate) use errors::UnifiedExecError;
+pub(crate) use output_artifact::OutputArtifactDescriptor;
+pub(crate) use output_artifact::OutputArtifactSpool;
+#[cfg(test)]
+pub(crate) use output_artifact::OutputArtifactStatus;
+pub(crate) use output_artifact::OutputArtifactStore;
 pub(crate) use process::NoopSpawnLifecycle;
 #[cfg(unix)]
 pub(crate) use process::SpawnLifecycle;
@@ -134,6 +140,7 @@ impl ProcessStore {
 pub(crate) struct UnifiedExecProcessManager {
     process_store: Mutex<ProcessStore>,
     max_write_stdin_yield_time_ms: u64,
+    output_artifact_store: Option<Arc<OutputArtifactStore>>,
 }
 
 impl UnifiedExecProcessManager {
@@ -142,7 +149,23 @@ impl UnifiedExecProcessManager {
             process_store: Mutex::new(ProcessStore::default()),
             max_write_stdin_yield_time_ms: max_write_stdin_yield_time_ms
                 .max(MIN_EMPTY_YIELD_TIME_MS),
+            output_artifact_store: None,
         }
+    }
+
+    pub(crate) fn with_output_artifacts(
+        mut self,
+        config: crate::config::ToolOutputSpillConfig,
+        thread_id: &str,
+    ) -> Self {
+        self.output_artifact_store = OutputArtifactStore::new(config, thread_id);
+        self
+    }
+
+    pub(crate) fn new_output_artifact_spool(&self) -> Option<OutputArtifactSpool> {
+        self.output_artifact_store
+            .as_ref()
+            .map(OutputArtifactStore::spool)
     }
 }
 

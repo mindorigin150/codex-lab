@@ -7,6 +7,7 @@ use crate::tools::TELEMETRY_PREVIEW_MAX_BYTES;
 use crate::tools::TELEMETRY_PREVIEW_MAX_LINES;
 use crate::tools::TELEMETRY_PREVIEW_TRUNCATION_NOTICE;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use crate::unified_exec::OutputArtifactDescriptor;
 use crate::unified_exec::format_output_omission_marker;
 use crate::unified_exec::resolve_max_tokens;
 use codex_protocol::mcp::CallToolResult;
@@ -325,6 +326,8 @@ pub struct ExecCommandToolOutput {
     pub original_token_count: Option<usize>,
     /// Bytes omitted by the output collection cap before model-facing truncation.
     pub output_omitted_bytes: Option<NonZeroUsize>,
+    /// Descriptor for output captured before the local unified-exec retention cap.
+    pub output_artifact: Option<OutputArtifactDescriptor>,
     pub hook_command: Option<String>,
 }
 
@@ -384,6 +387,8 @@ impl ToolOutput for ExecCommandToolOutput {
             session_id: Option<i32>,
             #[serde(skip_serializing_if = "Option::is_none")]
             original_token_count: Option<usize>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            output_artifact: Option<OutputArtifactDescriptor>,
             output: String,
         }
 
@@ -393,9 +398,14 @@ impl ToolOutput for ExecCommandToolOutput {
             exit_code: self.exit_code,
             session_id: self.process_id,
             original_token_count: self.original_token_count,
-            output: match self.max_output_tokens {
-                Some(max_tokens) => self.truncated_output(max_tokens),
-                None => String::from_utf8_lossy(&self.raw_output).to_string(),
+            output_artifact: self.output_artifact.clone(),
+            output: if self.output_artifact.is_some() {
+                self.model_visible_output()
+            } else {
+                match self.max_output_tokens {
+                    Some(max_tokens) => self.truncated_output(max_tokens),
+                    None => String::from_utf8_lossy(&self.raw_output).to_string(),
+                }
             },
         };
 
@@ -462,11 +472,47 @@ impl ExecCommandToolOutput {
             sections.push(format!("Original token count: {original_token_count}"));
         }
 
-        sections.push("Output:".to_string());
-        sections.push(self.truncated_output(self.model_output_max_tokens()));
+        if let Some(artifact) = &self.output_artifact {
+            sections.push(format_output_artifact(artifact));
+            sections.push("Output preview:".to_string());
+            sections.push(self.model_visible_output());
+        } else {
+            sections.push("Output:".to_string());
+            sections.push(self.truncated_output(self.model_output_max_tokens()));
+        }
 
         sections.join("\n")
     }
+
+    fn model_visible_output(&self) -> String {
+        let max_tokens = self.output_artifact.as_ref().map_or_else(
+            || self.model_output_max_tokens(),
+            |artifact| {
+                artifact
+                    .preview_token_limit
+                    .min(self.model_output_max_tokens())
+            },
+        );
+        self.truncated_output(max_tokens)
+    }
+}
+
+fn format_output_artifact(artifact: &OutputArtifactDescriptor) -> String {
+    let completeness = if artifact.complete {
+        "complete"
+    } else {
+        "retained; not guaranteed complete"
+    };
+    format!(
+        "Output artifact: {}\nArtifact ID: {}\nArtifact status: {:?} ({completeness})\nObserved bytes: {}\nStored bytes: {}\nOmitted artifact bytes: {}\nSuggested inspection: rg -n \"pattern\" -- '{}'",
+        artifact.path,
+        artifact.id,
+        artifact.status,
+        artifact.observed_bytes,
+        artifact.stored_bytes,
+        artifact.omitted_bytes,
+        artifact.path.replace('\'', "'\\''"),
+    )
 }
 
 fn function_tool_response(

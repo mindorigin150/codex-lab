@@ -435,6 +435,7 @@ fn exec_command_tool_output_formats_truncated_response() {
         exit_code: Some(0),
         original_token_count: Some(10),
         output_omitted_bytes: None,
+        output_artifact: None,
         hook_command: None,
     }
     .to_response_item("call-42", &payload);
@@ -486,6 +487,7 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
         exit_code: Some(0),
         original_token_count: Some(42_000),
         output_omitted_bytes: NonZeroUsize::new(/*n*/ 123_456),
+        output_artifact: None,
         hook_command: None,
     }
     .to_response_item("call-omitted", &payload);
@@ -500,4 +502,60 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
     assert!(text.contains("Original token count: 42000"));
     assert!(text.contains("Warning: truncated output (original token count: 42000)"));
     assert_eq!(text.matches(&marker).count(), 1);
+}
+
+#[test]
+fn exec_command_tool_output_formats_artifact_descriptor_for_model_and_code_mode() {
+    let payload = ToolPayload::Function {
+        arguments: "{}".to_string(),
+    };
+    let output = ExecCommandToolOutput {
+        event_call_id: "call-artifact".to_string(),
+        chunk_id: "artifact-chunk".to_string(),
+        wall_time: std::time::Duration::from_secs(1),
+        raw_output: b"one two three four five six seven eight".to_vec(),
+        truncation_policy: TruncationPolicy::Tokens(10_000),
+        max_output_tokens: Some(100),
+        process_id: None,
+        exit_code: Some(0),
+        original_token_count: Some(10),
+        output_omitted_bytes: None,
+        output_artifact: Some(crate::unified_exec::OutputArtifactDescriptor {
+            id: "artifact-id".to_string(),
+            path: "/tmp/private/output.log".to_string(),
+            observed_bytes: 40,
+            stored_bytes: 40,
+            omitted_bytes: 0,
+            complete: true,
+            status: crate::unified_exec::OutputArtifactStatus::Completed,
+            preview_token_limit: 2,
+        }),
+        hook_command: None,
+    };
+
+    let response = output.to_response_item("call-artifact", &payload);
+    let ResponseInputItem::FunctionCallOutput {
+        output: response, ..
+    } = response
+    else {
+        panic!("expected FunctionCallOutput");
+    };
+    let text = response.body.to_text().expect("model output text");
+    assert!(text.contains("Output artifact: /tmp/private/output.log"));
+    assert!(text.contains("Artifact ID: artifact-id"));
+    assert!(text.contains("Output preview:"));
+    assert!(text.contains("tokens truncated"));
+
+    assert_eq!(
+        output.code_mode_result(&payload)["output_artifact"],
+        json!({
+            "id": "artifact-id",
+            "path": "/tmp/private/output.log",
+            "observed_bytes": 40,
+            "stored_bytes": 40,
+            "omitted_bytes": 0,
+            "complete": true,
+            "status": "completed"
+        })
+    );
 }

@@ -31,6 +31,9 @@ use codex_utils_pty::SpawnedPty;
 use super::UNIFIED_EXEC_OUTPUT_MAX_TOKENS;
 use super::UnifiedExecError;
 use super::head_tail_buffer::HeadTailBuffer;
+use super::output_artifact::OutputArtifactDescriptor;
+use super::output_artifact::OutputArtifactHandle;
+use super::output_artifact::OutputArtifactSpool;
 use super::process_state::ProcessState;
 
 const EARLY_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(150);
@@ -65,6 +68,15 @@ pub(crate) struct OutputHandles {
     pub(crate) cancellation_token: CancellationToken,
 }
 
+struct LocalOutputTaskHandles {
+    buffer: OutputBuffer,
+    output_notify: Arc<Notify>,
+    output_closed: Arc<AtomicBool>,
+    output_closed_notify: Arc<Notify>,
+    output_tx: broadcast::Sender<Vec<u8>>,
+    output_artifact: Option<OutputArtifactSpool>,
+}
+
 /// Transport-specific process handle used by unified exec.
 enum ProcessHandle {
     Local(Box<ExecCommandSession>),
@@ -85,6 +97,7 @@ pub(crate) struct UnifiedExecProcess {
     state_tx: watch::Sender<ProcessState>,
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
+    output_artifact: Option<OutputArtifactHandle>,
     sandbox_type: SandboxType,
     _spawn_lifecycle: Option<SpawnLifecycleHandle>,
 }
@@ -104,6 +117,7 @@ impl UnifiedExecProcess {
         process_handle: ProcessHandle,
         sandbox_type: SandboxType,
         spawn_lifecycle: Option<SpawnLifecycleHandle>,
+        output_artifact: Option<OutputArtifactHandle>,
     ) -> Self {
         let output_buffer = Arc::new(Mutex::new(HeadTailBuffer::default()));
         let output_notify = Arc::new(Notify::new());
@@ -126,6 +140,7 @@ impl UnifiedExecProcess {
             state_tx,
             state_rx,
             output_task: None,
+            output_artifact,
             sandbox_type,
             _spawn_lifecycle: spawn_lifecycle,
         }
@@ -318,6 +333,7 @@ impl UnifiedExecProcess {
         spawned: SpawnedPty,
         sandbox_type: SandboxType,
         spawn_lifecycle: SpawnLifecycleHandle,
+        output_artifact: Option<OutputArtifactSpool>,
     ) -> Result<Self, UnifiedExecError> {
         let SpawnedPty {
             session: process_handle,
@@ -325,19 +341,24 @@ impl UnifiedExecProcess {
             stderr_rx,
             mut exit_rx,
         } = spawned;
-        let output_rx = codex_utils_pty::combine_output_receivers(stdout_rx, stderr_rx);
+        let output_artifact_handle = output_artifact.as_ref().map(OutputArtifactSpool::handle);
         let mut managed = Self::new(
             ProcessHandle::Local(Box::new(process_handle)),
             sandbox_type,
             Some(spawn_lifecycle),
+            output_artifact_handle,
         );
         managed.output_task = Some(Self::spawn_local_output_task(
-            output_rx,
-            Arc::clone(&managed.output_buffer),
-            Arc::clone(&managed.output_notify),
-            Arc::clone(&managed.output_closed),
-            Arc::clone(&managed.output_closed_notify),
-            managed.output_tx.clone(),
+            stdout_rx,
+            stderr_rx,
+            LocalOutputTaskHandles {
+                buffer: Arc::clone(&managed.output_buffer),
+                output_notify: Arc::clone(&managed.output_notify),
+                output_closed: Arc::clone(&managed.output_closed),
+                output_closed_notify: Arc::clone(&managed.output_closed_notify),
+                output_tx: managed.output_tx.clone(),
+                output_artifact,
+            },
         ));
 
         match exit_rx.try_recv() {
@@ -382,6 +403,7 @@ impl UnifiedExecProcess {
             process_handle,
             SandboxType::None,
             /*spawn_lifecycle*/ None,
+            /*output_artifact*/ None,
         );
         let output_handles = managed.output_handles();
         managed.output_task = Some(Self::spawn_exec_server_output_task(
@@ -576,31 +598,55 @@ impl UnifiedExecProcess {
     }
 
     fn spawn_local_output_task(
-        mut receiver: tokio::sync::broadcast::Receiver<Vec<u8>>,
-        buffer: OutputBuffer,
-        output_notify: Arc<Notify>,
-        output_closed: Arc<AtomicBool>,
-        output_closed_notify: Arc<Notify>,
-        output_tx: broadcast::Sender<Vec<u8>>,
+        mut stdout_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        mut stderr_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        handles: LocalOutputTaskHandles,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
+            let LocalOutputTaskHandles {
+                buffer,
+                output_notify,
+                output_closed,
+                output_closed_notify,
+                output_tx,
+                mut output_artifact,
+            } = handles;
+            let mut stdout_open = true;
+            let mut stderr_open = true;
             loop {
-                match receiver.recv().await {
-                    Ok(chunk) => {
-                        let mut guard = buffer.lock().await;
-                        guard.push_chunk(chunk.clone());
-                        drop(guard);
-                        let _ = output_tx.send(chunk);
-                        output_notify.notify_waiters();
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        output_closed.store(true, Ordering::Release);
-                        output_closed_notify.notify_waiters();
-                        break;
-                    }
+                let chunk = tokio::select! {
+                    chunk = stdout_rx.recv(), if stdout_open => match chunk {
+                        Some(chunk) => Some(chunk),
+                        None => {
+                            stdout_open = false;
+                            None
+                        }
+                    },
+                    chunk = stderr_rx.recv(), if stderr_open => match chunk {
+                        Some(chunk) => Some(chunk),
+                        None => {
+                            stderr_open = false;
+                            None
+                        }
+                    },
+                    else => break,
                 };
+                if let Some(chunk) = chunk {
+                    if let Some(output_artifact) = output_artifact.as_mut() {
+                        output_artifact.push(&chunk).await;
+                    }
+                    let mut guard = buffer.lock().await;
+                    guard.push_chunk(chunk.clone());
+                    drop(guard);
+                    let _ = output_tx.send(chunk);
+                    output_notify.notify_waiters();
+                }
             }
+            if let Some(output_artifact) = output_artifact.as_mut() {
+                output_artifact.complete().await;
+            }
+            output_closed.store(true, Ordering::Release);
+            output_closed_notify.notify_waiters();
         })
     }
 
@@ -608,6 +654,11 @@ impl UnifiedExecProcess {
         let state = self.state_rx.borrow().clone();
         let _ = self.state_tx.send_replace(state.exited(exit_code));
         self.cancellation_token.cancel();
+    }
+
+    pub(super) async fn output_artifact_descriptor(&self) -> Option<OutputArtifactDescriptor> {
+        let artifact = self.output_artifact.as_ref()?;
+        artifact.snapshot().await
     }
 }
 

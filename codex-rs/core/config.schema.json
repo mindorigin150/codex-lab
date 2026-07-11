@@ -2939,6 +2939,46 @@
       },
       "type": "object"
     },
+    "ToolOutputSpillToml": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Whether oversized unified-exec output is saved as a private local artifact.",
+          "type": "boolean"
+        },
+        "max_artifact_bytes": {
+          "description": "Maximum bytes stored for one artifact.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_store_bytes": {
+          "description": "Maximum bytes retained by the artifact store.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "preview_token_limit": {
+          "description": "Approximate token budget for the model-visible artifact preview.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "retention_days": {
+          "description": "Number of days artifacts remain eligible for reuse before cleanup.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "token_threshold": {
+          "description": "Approximate token count above which an artifact is created.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ToolSuggestConfig": {
       "additionalProperties": false,
       "properties": {
@@ -5480,6 +5520,14 @@
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
       "type": "boolean"
+    },
+    "tool_output_spill": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ToolOutputSpillToml"
+        }
+      ],
+      "description": "Optional artifact settings for oversized unified-exec output."
     },
     "tool_output_token_limit": {
       "description": "Token budget applied when storing tool/function outputs in the context manager.",

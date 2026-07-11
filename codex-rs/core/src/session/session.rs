@@ -1062,6 +1062,10 @@ impl Session {
                 mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
                 unified_exec_manager: UnifiedExecProcessManager::new(
                     config.background_terminal_max_timeout,
+                )
+                .with_output_artifacts(
+                    config.tool_output_spill.clone(),
+                    &thread_id.to_string(),
                 ),
                 elicitations: crate::elicitation::ElicitationService::new(),
                 shell_zsh_path: config.zsh_path.clone(),

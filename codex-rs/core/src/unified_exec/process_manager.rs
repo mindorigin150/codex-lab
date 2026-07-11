@@ -636,6 +636,7 @@ impl UnifiedExecProcessManager {
             (None, exit_code)
         };
 
+        let output_artifact = process.output_artifact_descriptor().await;
         let response = ExecCommandToolOutput {
             event_call_id: context.call_id.clone(),
             chunk_id,
@@ -647,6 +648,7 @@ impl UnifiedExecProcessManager {
             exit_code,
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
+            output_artifact,
             hook_command: Some(request.hook_command.clone()),
         };
 
@@ -796,6 +798,7 @@ impl UnifiedExecProcessManager {
             }
         };
 
+        let output_artifact = process.output_artifact_descriptor().await;
         let response = ExecCommandToolOutput {
             event_call_id,
             chunk_id,
@@ -807,6 +810,7 @@ impl UnifiedExecProcessManager {
             exit_code,
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
+            output_artifact,
             hook_command: Some(hook_command),
         };
 
@@ -1065,6 +1069,7 @@ impl UnifiedExecProcessManager {
                 spawned.map_err(|err| UnifiedExecError::create_process(err.to_string()))?,
                 request.sandbox,
                 spawn_lifecycle,
+                self.new_output_artifact_spool(),
             )
             .await;
         }
@@ -1121,7 +1126,13 @@ impl UnifiedExecProcessManager {
         let spawned =
             spawn_result.map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
         spawn_lifecycle.after_spawn();
-        UnifiedExecProcess::from_spawned(spawned, request.sandbox, spawn_lifecycle).await
+        UnifiedExecProcess::from_spawned(
+            spawned,
+            request.sandbox,
+            spawn_lifecycle,
+            self.new_output_artifact_spool(),
+        )
+        .await
     }
 
     pub(super) async fn open_session_with_sandbox(

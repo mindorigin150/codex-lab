@@ -28,6 +28,7 @@ use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
 use codex_config::config_toml::ThreadStoreToml;
+use codex_config::config_toml::ToolOutputSpillToml;
 use codex_config::config_toml::validate_model_providers;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::project_trust_key;
@@ -610,6 +611,49 @@ pub enum ThreadStoreConfig {
     InMemory { id: String },
 }
 
+pub(crate) const DEFAULT_TOOL_OUTPUT_SPILL_TOKEN_THRESHOLD: usize = 2_500;
+pub(crate) const DEFAULT_TOOL_OUTPUT_SPILL_PREVIEW_TOKEN_LIMIT: usize = 1_000;
+pub(crate) const DEFAULT_TOOL_OUTPUT_SPILL_MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const DEFAULT_TOOL_OUTPUT_SPILL_MAX_STORE_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const DEFAULT_TOOL_OUTPUT_SPILL_RETENTION_DAYS: u64 = 7;
+
+/// Effective settings for private, local unified-exec output artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutputSpillConfig {
+    pub enabled: bool,
+    pub token_threshold: usize,
+    pub preview_token_limit: usize,
+    pub max_artifact_bytes: u64,
+    pub max_store_bytes: u64,
+    pub retention_days: u64,
+    pub output_dir: AbsolutePathBuf,
+}
+
+impl ToolOutputSpillConfig {
+    fn from_toml(toml: Option<ToolOutputSpillToml>, codex_home: &AbsolutePathBuf) -> Self {
+        let toml = toml.unwrap_or_default();
+        Self {
+            enabled: toml.enabled.unwrap_or(false),
+            token_threshold: toml
+                .token_threshold
+                .unwrap_or(DEFAULT_TOOL_OUTPUT_SPILL_TOKEN_THRESHOLD),
+            preview_token_limit: toml
+                .preview_token_limit
+                .unwrap_or(DEFAULT_TOOL_OUTPUT_SPILL_PREVIEW_TOKEN_LIMIT),
+            max_artifact_bytes: toml
+                .max_artifact_bytes
+                .unwrap_or(DEFAULT_TOOL_OUTPUT_SPILL_MAX_ARTIFACT_BYTES),
+            max_store_bytes: toml
+                .max_store_bytes
+                .unwrap_or(DEFAULT_TOOL_OUTPUT_SPILL_MAX_STORE_BYTES),
+            retention_days: toml
+                .retention_days
+                .unwrap_or(DEFAULT_TOOL_OUTPUT_SPILL_RETENTION_DAYS),
+            output_dir: codex_home.join("artifacts").join("exec"),
+        }
+    }
+}
+
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -857,6 +901,9 @@ pub struct Config {
 
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
+
+    /// Settings for private local unified-exec output artifacts.
+    pub tool_output_spill: ToolOutputSpillConfig,
 
     /// User-configured maximum number of agent threads that can be open concurrently.
     pub agent_max_threads: Option<usize>,
@@ -3531,6 +3578,8 @@ impl Config {
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
             .max(MIN_EMPTY_YIELD_TIME_MS);
+        let tool_output_spill =
+            ToolOutputSpillConfig::from_toml(cfg.tool_output_spill.clone(), &codex_home);
 
         let ghost_snapshot = {
             let mut config = GhostSnapshotConfig::default();
@@ -3941,6 +3990,7 @@ impl Config {
             code_mode,
             use_experimental_unified_exec_tool,
             background_terminal_max_timeout,
+            tool_output_spill,
             ghost_snapshot,
             multi_agent_v2,
             token_budget,

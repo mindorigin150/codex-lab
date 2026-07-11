@@ -24,6 +24,7 @@ use codex_config::config_toml::RealtimeToml;
 use codex_config::config_toml::RealtimeTransport;
 use codex_config::config_toml::RealtimeWsMode;
 use codex_config::config_toml::RealtimeWsVersion;
+use codex_config::config_toml::ToolOutputSpillToml;
 use codex_config::config_toml::ToolsToml;
 use codex_config::loader::project_trust_key;
 use codex_config::permissions_toml::FilesystemPermissionToml;
@@ -5613,6 +5614,44 @@ async fn legacy_toggles_map_to_features() -> std::io::Result<()> {
     assert!(config.features.enabled(Feature::UnifiedExec));
 
     assert!(config.use_experimental_unified_exec_tool);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_output_spill_config_uses_defaults_and_explicit_limits() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        tool_output_spill: Some(ToolOutputSpillToml {
+            enabled: Some(true),
+            token_threshold: None,
+            preview_token_limit: Some(800),
+            max_artifact_bytes: Some(4096),
+            max_store_bytes: None,
+            retention_days: Some(2),
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.tool_output_spill,
+        super::ToolOutputSpillConfig {
+            enabled: true,
+            token_threshold: super::DEFAULT_TOOL_OUTPUT_SPILL_TOKEN_THRESHOLD,
+            preview_token_limit: 800,
+            max_artifact_bytes: 4096,
+            max_store_bytes: super::DEFAULT_TOOL_OUTPUT_SPILL_MAX_STORE_BYTES,
+            retention_days: 2,
+            output_dir: codex_home.abs().join("artifacts").join("exec"),
+        }
+    );
 
     Ok(())
 }
