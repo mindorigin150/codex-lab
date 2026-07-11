@@ -1,0 +1,318 @@
+#!/bin/sh
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+CODEX_RS_DIR="$REPO_ROOT/codex-rs"
+
+LAB_HOME="${CODEX_LAB_HOME:-$HOME/.codex-lab}"
+SHARED_STATE_HOME="${CODEX_SHARED_STATE_HOME:-$HOME/.codex}"
+INSTALL_ROOT="${CODEX_LAB_INSTALL_ROOT:-$HOME/.local/lib/codex-lab}"
+BIN_DIR="${CODEX_LAB_BIN_DIR:-$HOME/.local/bin}"
+SOURCE_BINARY="${CODEX_LAB_BINARY:-}"
+RELEASE_ID="${CODEX_LAB_RELEASE_ID:-}"
+RUN_DOCTOR="${CODEX_LAB_RUN_DOCTOR:-true}"
+STRIP_BINARY="${CODEX_LAB_STRIP_BINARY:-true}"
+
+step() {
+  printf '==> %s\n' "$1"
+}
+
+warn() {
+  printf 'WARNING: %s\n' "$1" >&2
+}
+
+usage() {
+  cat <<'EOF'
+Usage: install-codex-lab.sh [OPTIONS]
+
+Build and install the current checkout as `codex-lab`.
+
+The lab configuration remains isolated under ~/.codex-lab. Conversation
+rollouts and SQLite-backed state are shared with the official Codex home under
+~/.codex, so `codex resume` and `codex-lab resume` see the same history.
+
+Options:
+  --binary PATH       Install an already-built codex binary instead of building.
+  --release-id ID     Versioned install directory name (default: git commit).
+  --skip-doctor       Do not run the installed binary's doctor command.
+  --no-strip          Do not strip debug symbols from the installed copy.
+  -h, --help          Show this help.
+
+Environment:
+  CODEX_LAB_HOME          Lab config home (default: ~/.codex-lab).
+  CODEX_SHARED_STATE_HOME Shared official Codex home (default: ~/.codex).
+  CODEX_LAB_INSTALL_ROOT  Versioned install root.
+  CODEX_LAB_BIN_DIR       Directory for the codex-lab launcher.
+  CODEX_LAB_BINARY        Same as --binary.
+  CODEX_LAB_RELEASE_ID    Same as --release-id.
+  CODEX_LAB_RUN_DOCTOR    true/false; default true.
+  CODEX_LAB_STRIP_BINARY  true/false; default true.
+EOF
+}
+
+is_true() {
+  case "$1" in
+    1 | true | TRUE | yes | YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --binary)
+        [ "$#" -ge 2 ] || {
+          echo "--binary requires a path." >&2
+          exit 1
+        }
+        SOURCE_BINARY="$2"
+        shift
+        ;;
+      --release-id)
+        [ "$#" -ge 2 ] || {
+          echo "--release-id requires a value." >&2
+          exit 1
+        }
+        RELEASE_ID="$2"
+        shift
+        ;;
+      --skip-doctor)
+        RUN_DOCTOR=false
+        ;;
+      --no-strip)
+        STRIP_BINARY=false
+        ;;
+      --help | -h)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
+
+validate_release_id() {
+  case "$1" in
+    '' | *[!A-Za-z0-9._-]*)
+      echo "Invalid release id: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+default_release_id() {
+  if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse HEAD >/dev/null 2>&1; then
+    commit=$(git -C "$REPO_ROOT" rev-parse HEAD)
+    if git -C "$REPO_ROOT" diff --quiet --ignore-submodules -- &&
+      git -C "$REPO_ROOT" diff --cached --quiet --ignore-submodules --; then
+      printf '%s\n' "$commit"
+    else
+      printf '%s-dirty-%s\n' "$commit" "$(date +%Y%m%d%H%M%S)"
+    fi
+  else
+    printf 'local-%s\n' "$(date +%Y%m%d%H%M%S)"
+  fi
+}
+
+sha256_file() {
+  path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    printf 'unavailable\n'
+  fi
+}
+
+replace_path_with_symlink() {
+  link_path="$1"
+  link_target="$2"
+  tmp_link="$3"
+
+  rm -f "$tmp_link"
+  ln -s "$link_target" "$tmp_link"
+  if mv -Tf "$tmp_link" "$link_path" 2>/dev/null; then
+    return
+  fi
+  if mv -hf "$tmp_link" "$link_path" 2>/dev/null; then
+    return
+  fi
+  rm -f "$link_path"
+  mv -f "$tmp_link" "$link_path"
+}
+
+check_shared_rollout_dir() {
+  name="$1"
+  shared_dir="$SHARED_STATE_HOME/$name"
+  lab_path="$LAB_HOME/$name"
+
+  if [ -L "$lab_path" ]; then
+    current_target=$(readlink "$lab_path" 2>/dev/null || true)
+    if [ "$current_target" != "$shared_dir" ]; then
+      echo "$lab_path already links to $current_target; expected $shared_dir." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  if [ -e "$lab_path" ] &&
+    { [ ! -d "$lab_path" ] || [ -n "$(find "$lab_path" -mindepth 1 -maxdepth 1 -print -quit)" ]; }; then
+    cat >&2 <<EOF
+$lab_path already contains data and will not be replaced.
+Merge or back up that directory manually, then rerun the installer.
+EOF
+    exit 1
+  fi
+}
+
+ensure_shared_rollout_dir() {
+  name="$1"
+  shared_dir="$SHARED_STATE_HOME/$name"
+  lab_path="$LAB_HOME/$name"
+
+  check_shared_rollout_dir "$name"
+  mkdir -p "$shared_dir"
+  if [ -L "$lab_path" ]; then
+    return
+  fi
+
+  if [ -e "$lab_path" ]; then
+    rmdir "$lab_path"
+  fi
+
+  ln -s "$shared_dir" "$lab_path"
+}
+
+install_launcher() {
+  launcher="$BIN_DIR/codex-lab"
+  staged_launcher="$BIN_DIR/.codex-lab.$$"
+  backup_stamp=$(date +%Y%m%d-%H%M%S)
+
+  mkdir -p "$BIN_DIR"
+  cat >"$staged_launcher" <<EOF
+#!/bin/sh
+set -eu
+
+DEFAULT_CODEX_LAB_HOME='$LAB_HOME'
+DEFAULT_CODEX_SHARED_STATE_HOME='$SHARED_STATE_HOME'
+CODEX_LAB_INSTALL_ROOT=\${CODEX_LAB_INSTALL_ROOT:-'$INSTALL_ROOT'}
+
+export CODEX_HOME=\${CODEX_LAB_HOME:-\$DEFAULT_CODEX_LAB_HOME}
+export CODEX_SQLITE_HOME=\${CODEX_SHARED_STATE_HOME:-\$DEFAULT_CODEX_SHARED_STATE_HOME}
+exec "\$CODEX_LAB_INSTALL_ROOT/current/bin/codex" "\$@"
+EOF
+  chmod 0755 "$staged_launcher"
+
+  if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+    if cmp -s "$launcher" "$staged_launcher"; then
+      rm -f "$staged_launcher"
+      return
+    fi
+    cp -p "$launcher" "$launcher.bak-$backup_stamp"
+  fi
+  mv -f "$staged_launcher" "$launcher"
+}
+
+maybe_strip_binary() {
+  path="$1"
+  is_true "$STRIP_BINARY" || return 0
+  command -v strip >/dev/null 2>&1 || return 0
+
+  case "$(uname -s)" in
+    Darwin) strip -x "$path" 2>/dev/null || warn "Could not strip $path" ;;
+    *) strip "$path" 2>/dev/null || warn "Could not strip $path" ;;
+  esac
+}
+
+parse_args "$@"
+check_shared_rollout_dir sessions
+check_shared_rollout_dir archived_sessions
+
+if [ -z "$SOURCE_BINARY" ]; then
+  command -v cargo >/dev/null 2>&1 || {
+    echo "cargo is required unless --binary is provided." >&2
+    exit 1
+  }
+  step "Building codex-cli in release mode"
+  (cd "$CODEX_RS_DIR" && cargo build --release -p codex-cli)
+  SOURCE_BINARY="$CODEX_RS_DIR/target/release/codex"
+fi
+
+[ -f "$SOURCE_BINARY" ] && [ -x "$SOURCE_BINARY" ] || {
+  echo "Codex binary is not executable: $SOURCE_BINARY" >&2
+  exit 1
+}
+
+if [ -z "$RELEASE_ID" ]; then
+  RELEASE_ID=$(default_release_id)
+fi
+validate_release_id "$RELEASE_ID"
+
+RELEASES_DIR="$INSTALL_ROOT/releases"
+RELEASE_DIR="$RELEASES_DIR/$RELEASE_ID"
+STAGING_DIR="$RELEASES_DIR/.staging.$RELEASE_ID.$$"
+CURRENT_LINK="$INSTALL_ROOT/current"
+
+cleanup() {
+  rm -rf "$STAGING_DIR"
+}
+trap cleanup EXIT HUP INT TERM
+
+step "Installing versioned release $RELEASE_ID"
+mkdir -p "$RELEASES_DIR" "$LAB_HOME" "$SHARED_STATE_HOME"
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR/bin"
+cp "$SOURCE_BINARY" "$STAGING_DIR/bin/codex"
+chmod 0755 "$STAGING_DIR/bin/codex"
+maybe_strip_binary "$STAGING_DIR/bin/codex"
+
+binary_sha256=$(sha256_file "$STAGING_DIR/bin/codex")
+cat >"$STAGING_DIR/manifest.txt" <<EOF
+release_id=$RELEASE_ID
+source_binary=$SOURCE_BINARY
+binary_sha256=$binary_sha256
+built_at=$(date '+%Y-%m-%dT%H:%M:%S%z')
+EOF
+
+if [ -e "$RELEASE_DIR" ]; then
+  existing_sha256=$(sha256_file "$RELEASE_DIR/bin/codex")
+  if [ "$existing_sha256" != "$binary_sha256" ]; then
+    echo "Release $RELEASE_ID already exists with a different binary." >&2
+    exit 1
+  fi
+  rm -rf "$STAGING_DIR"
+else
+  mv "$STAGING_DIR" "$RELEASE_DIR"
+fi
+
+replace_path_with_symlink "$CURRENT_LINK" "releases/$RELEASE_ID" "$INSTALL_ROOT/.current.$$"
+
+step "Configuring isolated lab config with shared conversation history"
+ensure_shared_rollout_dir sessions
+ensure_shared_rollout_dir archived_sessions
+install_launcher
+
+if is_true "$RUN_DOCTOR"; then
+  step "Validating codex-lab"
+  if ! "$BIN_DIR/codex-lab" doctor --summary --no-color --ascii; then
+    warn "codex-lab was installed, but doctor reported a problem"
+  fi
+fi
+
+cat <<EOF
+
+codex-lab installed successfully.
+  launcher:      $BIN_DIR/codex-lab
+  release:       $RELEASE_DIR
+  lab config:    $LAB_HOME
+  shared state:  $SHARED_STATE_HOME
+
+Use 'codex-lab resume --all' to see conversations from both Codex installations.
+EOF
