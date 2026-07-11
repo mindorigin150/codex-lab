@@ -193,6 +193,7 @@ async fn exec_command_with_tty(
             .store(false, std::sync::atomic::Ordering::Release);
     }
 
+    let output_artifact = process.output_artifact_descriptor().await;
     Ok(ExecCommandToolOutput {
         event_call_id: context.call_id,
         chunk_id: generate_chunk_id(),
@@ -204,6 +205,7 @@ async fn exec_command_with_tty(
         exit_code,
         original_token_count: Some(original_token_count),
         output_omitted_bytes,
+        output_artifact,
         hook_command: Some(cmd.to_string()),
     })
 }

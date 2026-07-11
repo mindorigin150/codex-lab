@@ -43,6 +43,7 @@ pub use codex_core::config::OrchestratedModeConfig;
 pub use codex_core::config::Permissions;
 pub use codex_core::config::TerminalResizeReflowConfig;
 pub use codex_core::config::ThreadStoreConfig;
+pub use codex_core::config::ToolOutputSpillConfig;
 pub use codex_core::config::find_codex_home;
 pub use codex_core::init_state_db;
 pub use codex_core::local_agent_graph_store_from_state_db;

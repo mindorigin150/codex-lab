@@ -302,6 +302,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
+        output_artifact: None,
         hook_command: Some("echo three".to_string()),
     };
     let invocation = invocation_for_payload("exec_command", "call-43", payload).await;
@@ -333,6 +334,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_interactive_completi
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
+        output_artifact: None,
         hook_command: Some("echo three".to_string()),
     };
     let invocation = invocation_for_payload("exec_command", "call-44", payload).await;
@@ -365,6 +367,7 @@ async fn exec_command_post_tool_use_payload_skips_running_sessions() {
         exit_code: None,
         original_token_count: None,
         output_omitted_bytes: None,
+        output_artifact: None,
         hook_command: Some("echo three".to_string()),
     };
     let invocation = invocation_for_payload("exec_command", "call-45", payload).await;
@@ -392,6 +395,7 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
+        output_artifact: None,
         hook_command: Some("sleep 1; echo finished".to_string()),
     };
     let invocation = invocation_for_payload("write_stdin", "write-stdin-call", payload).await;
@@ -424,6 +428,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
+        output_artifact: None,
         hook_command: Some("sleep 2; echo alpha".to_string()),
     };
     let output_b = ExecCommandToolOutput {
@@ -437,6 +442,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
+        output_artifact: None,
         hook_command: Some("sleep 1; echo beta".to_string()),
     };
     let invocation_b = invocation_for_payload("write_stdin", "write-call-b", payload.clone()).await;

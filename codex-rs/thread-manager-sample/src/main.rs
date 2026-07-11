@@ -48,6 +48,7 @@ use codex_core_api::SessionSource;
 use codex_core_api::TerminalResizeReflowConfig;
 use codex_core_api::ThreadManager;
 use codex_core_api::ThreadStoreConfig;
+use codex_core_api::ToolOutputSpillConfig;
 use codex_core_api::ToolSuggestConfig;
 use codex_core_api::TuiKeymap;
 use codex_core_api::TuiNotificationSettings;
@@ -250,6 +251,15 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         config_lock_allow_codex_version_mismatch: false,
         config_lock_save_fields_resolved_from_model_catalog: true,
         config_lock_toml: None,
+        tool_output_spill: ToolOutputSpillConfig {
+            enabled: false,
+            token_threshold: 2_500,
+            preview_token_limit: 1_000,
+            max_artifact_bytes: 64 * 1024 * 1024,
+            max_store_bytes: 1024 * 1024 * 1024,
+            retention_days: 7,
+            output_dir: codex_home.join("artifacts").join("exec"),
+        },
         codex_home,
         history: History::default(),
         ephemeral: true,
