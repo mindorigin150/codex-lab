@@ -614,6 +614,7 @@ pub enum ModeKind {
         alias = "code",
         alias = "pair_programming",
         alias = "execute",
+        alias = "orchestrated",
         alias = "custom"
     )]
     Default,
@@ -778,7 +779,13 @@ mod tests {
 
     #[test]
     fn mode_kind_deserializes_alias_values_to_default() {
-        for alias in ["code", "pair_programming", "execute", "custom"] {
+        for alias in [
+            "code",
+            "pair_programming",
+            "execute",
+            "orchestrated",
+            "custom",
+        ] {
             let json = format!("\"{alias}\"");
             let mode: ModeKind = serde_json::from_str(&json).expect("deserialize mode");
             assert_eq!(ModeKind::Default, mode);
