@@ -15,7 +15,7 @@ use std::time::Duration;
 const FIRST_PROMPT: &str = "spawn the first worker";
 const FIRST_TASK: &str = "first worker task";
 const SECOND_TASK: &str = "second worker task";
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     serde_json::from_slice::<serde_json::Value>(&request.body)
@@ -111,6 +111,7 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
             .features
             .enable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
+        config.agent_max_depth = 2;
         config.multi_agent_v2.max_concurrent_threads_per_session = 2;
     });
     let test = builder.build(&server).await?;

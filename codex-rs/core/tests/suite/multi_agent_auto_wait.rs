@@ -22,7 +22,7 @@ use std::time::Duration;
 const PARENT_PROMPT: &str = "delegate this investigation to an explorer";
 const CHILD_ANSWER: &str = "the explorer found the answer";
 const SPAWN_CALL_ID: &str = "spawn-explorer";
-const COLLABORATION_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     decoded_body(req)
@@ -79,7 +79,7 @@ async fn parent_automatically_waits_for_explorer_final_answer_before_sampling() 
             ev_response_created("resp-parent-spawn"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                COLLABORATION_NAMESPACE,
+                MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -179,7 +179,7 @@ async fn user_input_temporarily_releases_the_explorer_barrier_without_cancelling
             ev_response_created("resp-steer-spawn"),
             ev_function_call_with_namespace(
                 CALL_ID,
-                COLLABORATION_NAMESPACE,
+                MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),

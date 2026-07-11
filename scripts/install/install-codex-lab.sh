@@ -190,6 +190,45 @@ ensure_shared_rollout_dir() {
   ln -s "$shared_dir" "$lab_path"
 }
 
+ensure_multi_agent_namespace() {
+  config="$LAB_HOME/config.toml"
+
+  if [ -L "$config" ] && [ ! -e "$config" ]; then
+    echo "$config is a dangling symlink; refusing to write through it." >&2
+    exit 1
+  fi
+
+  if [ -e "$config" ]; then
+    if [ ! -f "$config" ]; then
+      echo "$config exists but is not a regular file." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  if ! (umask 077 && set -C && : >"$CONFIG_TMP") 2>/dev/null; then
+    echo "Could not create temporary config: $CONFIG_TMP" >&2
+    exit 1
+  fi
+  cat >"$CONFIG_TMP" <<'EOF'
+[features.multi_agent_v2]
+tool_namespace = "agents"
+EOF
+  chmod 0600 "$CONFIG_TMP"
+
+  if ln "$CONFIG_TMP" "$config" 2>/dev/null; then
+    rm -f "$CONFIG_TMP"
+    return
+  fi
+
+  rm -f "$CONFIG_TMP"
+  if [ -e "$config" ] && [ -f "$config" ]; then
+    return
+  fi
+  echo "Could not publish config without overwriting another path: $config" >&2
+  exit 1
+}
+
 install_launcher() {
   launcher="$BIN_DIR/codex-lab"
   staged_launcher="$BIN_DIR/.codex-lab.$$"
@@ -259,14 +298,19 @@ RELEASES_DIR="$INSTALL_ROOT/releases"
 RELEASE_DIR="$RELEASES_DIR/$RELEASE_ID"
 STAGING_DIR="$RELEASES_DIR/.staging.$RELEASE_ID.$$"
 CURRENT_LINK="$INSTALL_ROOT/current"
+CONFIG_TMP="$LAB_HOME/.config.toml.$$"
 
 cleanup() {
   rm -rf "$STAGING_DIR"
+  rm -f "$CONFIG_TMP"
 }
 trap cleanup EXIT HUP INT TERM
 
+mkdir -p "$LAB_HOME" "$SHARED_STATE_HOME"
+ensure_multi_agent_namespace
+
 step "Installing versioned release $RELEASE_ID"
-mkdir -p "$RELEASES_DIR" "$LAB_HOME" "$SHARED_STATE_HOME"
+mkdir -p "$RELEASES_DIR"
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR/bin"
 cp "$SOURCE_BINARY" "$STAGING_DIR/bin/codex"

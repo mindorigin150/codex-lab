@@ -111,10 +111,7 @@ mod tests {
         assert!(is_blocking_spawn(&spawn("reviewer"), None));
         assert!(!is_blocking_spawn(&spawn("worker"), None));
         assert!(is_collaboration_call(&spawn("explorer"), None));
-        assert!(!is_collaboration_call(
-            &spawn("explorer"),
-            Some("collaboration")
-        ));
+        assert!(!is_collaboration_call(&spawn("explorer"), Some("agents")));
         assert!(!is_collaboration_call(
             &ToolCall {
                 tool_name: codex_tools::ToolName::plain("exec_command"),
