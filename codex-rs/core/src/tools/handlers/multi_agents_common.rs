@@ -1,5 +1,3 @@
-use crate::agent::role::EXPLORER_ROLE_NAME;
-use crate::agent::role::WORKER_ROLE_NAME;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
@@ -12,8 +10,6 @@ use crate::tools::context::ToolPayload;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
-use codex_protocol::config_types::CollaborationMode;
-use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseInputItem;
@@ -205,59 +201,6 @@ pub(crate) fn reject_full_fork_spawn_overrides(
         ));
     }
     Ok(())
-}
-
-pub(crate) fn inherited_spawn_collaboration_mode(
-    turn: &TurnContext,
-    config: &Config,
-    _agent_role: Option<&str>,
-) -> Option<CollaborationMode> {
-    if turn.collaboration_mode.mode != ModeKind::Orchestrated {
-        return None;
-    }
-
-    let mut child_mode = turn.collaboration_mode.with_updates(
-        config.model.clone(),
-        Some(config.model_reasoning_effort.clone()),
-        Some(None),
-    );
-    child_mode.mode = ModeKind::Default;
-    Some(child_mode)
-}
-
-/// Resolves requested model settings with configured cheap defaults for orchestrated leaf agents.
-///
-/// The returned pair is passed through the normal spawn validation before role-locked settings
-/// are applied. Resolving the pair together prevents mixing an unvalidated model and effort.
-pub(crate) fn orchestrated_leaf_model_overrides(
-    turn: &TurnContext,
-    agent_role: Option<&str>,
-    requested_model: Option<&str>,
-    requested_reasoning_effort: Option<ReasoningEffort>,
-) -> (Option<String>, Option<ReasoningEffort>) {
-    let (model, reasoning_effort) = match agent_role {
-        Some(EXPLORER_ROLE_NAME) if turn.collaboration_mode.mode == ModeKind::Orchestrated => (
-            turn.config.orchestrated_mode.explorer_model.as_ref(),
-            turn.config
-                .orchestrated_mode
-                .explorer_reasoning_effort
-                .as_ref(),
-        ),
-        Some(WORKER_ROLE_NAME) if turn.collaboration_mode.mode == ModeKind::Orchestrated => (
-            turn.config.orchestrated_mode.worker_model.as_ref(),
-            turn.config
-                .orchestrated_mode
-                .worker_reasoning_effort
-                .as_ref(),
-        ),
-        _ => (None, None),
-    };
-    (
-        requested_model
-            .map(str::to_string)
-            .or_else(|| model.cloned()),
-        requested_reasoning_effort.or_else(|| reasoning_effort.cloned()),
-    )
 }
 
 /// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.

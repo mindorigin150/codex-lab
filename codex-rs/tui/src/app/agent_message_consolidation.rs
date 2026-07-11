@@ -26,7 +26,6 @@ impl App {
         tui: &mut tui::Tui,
         source: String,
         cwd: PathBuf,
-        attribution: crate::orchestrated_role::Attribution,
         scrollback_reflow: ConsolidationScrollbackReflow,
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
     ) -> Result<()> {
@@ -53,9 +52,8 @@ impl App {
             tracing::debug!(
                 "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
             );
-            let consolidated: Arc<dyn HistoryCell> = Arc::new(
-                history_cell::AgentMarkdownCell::new_with_attribution(source, &cwd, attribution),
-            );
+            let consolidated: Arc<dyn HistoryCell> =
+                Arc::new(history_cell::AgentMarkdownCell::new(source, &cwd));
             self.transcript_cells
                 .splice(start..end, std::iter::once(consolidated.clone()));
 

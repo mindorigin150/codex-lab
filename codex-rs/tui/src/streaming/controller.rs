@@ -40,7 +40,6 @@ use crate::history_cell::HistoryRenderMode;
 use crate::history_cell::raw_lines_from_source;
 use crate::history_cell::{self};
 use crate::markdown::render_markdown_agent_with_links_and_cwd;
-use crate::orchestrated_role::Attribution;
 use crate::style::proposed_plan_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::plain_hyperlink_lines;
@@ -463,7 +462,6 @@ impl StreamCore {
 pub(crate) struct StreamController {
     core: StreamCore,
     header_emitted: bool,
-    attribution: Attribution,
 }
 
 impl StreamController {
@@ -472,16 +470,10 @@ impl StreamController {
     /// `width` is the content width available to markdown rendering, not necessarily the full
     /// terminal width. Passing a stale width after resize will keep queued live output wrapped for
     /// the old viewport until app-level reflow repairs the finalized transcript.
-    pub(crate) fn new(
-        width: Option<usize>,
-        cwd: &Path,
-        render_mode: HistoryRenderMode,
-        attribution: Attribution,
-    ) -> Self {
+    pub(crate) fn new(width: Option<usize>, cwd: &Path, render_mode: HistoryRenderMode) -> Self {
         Self {
             core: StreamCore::new(width, cwd, render_mode),
             header_emitted: false,
-            attribution,
         }
     }
 
@@ -545,10 +537,6 @@ impl StreamController {
         self.core.has_tail()
     }
 
-    pub(crate) fn attribution(&self) -> &Attribution {
-        &self.attribution
-    }
-
     pub(crate) fn clear_queue(&mut self) {
         self.core.state.clear_queue();
         self.core.enqueued_stable_len = self.core.emitted_stable_len;
@@ -567,15 +555,11 @@ impl StreamController {
             return None;
         }
         Some(Box::new(
-            history_cell::AgentMessageCell::new_hyperlink_lines(
-                lines,
-                {
-                    let header_emitted = self.header_emitted;
-                    self.header_emitted = true;
-                    !header_emitted
-                },
-                self.attribution.clone(),
-            ),
+            history_cell::AgentMessageCell::new_hyperlink_lines(lines, {
+                let header_emitted = self.header_emitted;
+                self.header_emitted = true;
+                !header_emitted
+            }),
         ))
     }
 }
@@ -757,12 +741,7 @@ mod tests {
     }
 
     fn stream_controller(width: Option<usize>) -> StreamController {
-        StreamController::new(
-            width,
-            &test_cwd(),
-            HistoryRenderMode::Rich,
-            Attribution::Unattributed,
-        )
+        StreamController::new(width, &test_cwd(), HistoryRenderMode::Rich)
     }
 
     fn plan_stream_controller(width: Option<usize>) -> PlanStreamController {

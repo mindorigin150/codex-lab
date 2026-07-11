@@ -24,7 +24,6 @@ use codex_config::ThreadConfigLoader;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
-use codex_config::config_toml::OrchestratedModeToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
@@ -995,8 +994,6 @@ pub struct Config {
     /// Plan preset. The `none` value means "no reasoning" (not "inherit the
     /// global default").
     pub plan_mode_reasoning_effort: Option<ReasoningEffort>,
-    /// Orchestrated-mode opt-in, internal-role routing, and turn budgets.
-    pub orchestrated_mode: OrchestratedModeConfig,
 
     /// Optional value to use for `reasoning.summary` when making a request
     /// using the Responses API. When unset, the model catalog default is used.
@@ -1184,80 +1181,6 @@ impl Default for CurrentTimeReminderConfig {
             clock_source: CurrentTimeSource::System,
             delivery_mode: CurrentTimeReminderDeliveryMode::AnyInference,
             sleep_tool: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct OrchestratedModeConfig {
-    pub enabled: bool,
-    pub direct_enabled: bool,
-    pub worker_model: Option<String>,
-    pub worker_reasoning_effort: Option<ReasoningEffort>,
-    pub explorer_model: Option<String>,
-    pub explorer_reasoning_effort: Option<ReasoningEffort>,
-    pub max_phase_steps: usize,
-    pub max_turn_model_requests: usize,
-    pub max_turn_tokens: u64,
-    pub max_turn_seconds: u64,
-    pub max_plan_revisions: usize,
-    pub max_work_revisions: usize,
-}
-
-impl Default for OrchestratedModeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            direct_enabled: false,
-            worker_model: None,
-            worker_reasoning_effort: None,
-            explorer_model: None,
-            explorer_reasoning_effort: None,
-            max_phase_steps: 12,
-            max_turn_model_requests: 32,
-            max_turn_tokens: 500_000,
-            max_turn_seconds: 1_800,
-            max_plan_revisions: 1,
-            max_work_revisions: 2,
-        }
-    }
-}
-
-impl From<Option<OrchestratedModeToml>> for OrchestratedModeConfig {
-    fn from(value: Option<OrchestratedModeToml>) -> Self {
-        let Some(value) = value else {
-            return Self::default();
-        };
-        let defaults = Self::default();
-        Self {
-            enabled: value.enabled.unwrap_or(defaults.enabled),
-            direct_enabled: value.direct_enabled.unwrap_or(defaults.direct_enabled),
-            worker_model: value.worker_model,
-            worker_reasoning_effort: value.worker_reasoning_effort,
-            explorer_model: value.explorer_model,
-            explorer_reasoning_effort: value.explorer_reasoning_effort,
-            max_phase_steps: value
-                .max_phase_steps
-                .unwrap_or(defaults.max_phase_steps)
-                .max(1),
-            max_turn_model_requests: value
-                .max_turn_model_requests
-                .unwrap_or(defaults.max_turn_model_requests)
-                .max(1),
-            max_turn_tokens: value
-                .max_turn_tokens
-                .unwrap_or(defaults.max_turn_tokens)
-                .max(1),
-            max_turn_seconds: value
-                .max_turn_seconds
-                .unwrap_or(defaults.max_turn_seconds)
-                .max(1),
-            max_plan_revisions: value
-                .max_plan_revisions
-                .unwrap_or(defaults.max_plan_revisions),
-            max_work_revisions: value
-                .max_work_revisions
-                .unwrap_or(defaults.max_work_revisions),
         }
     }
 }
@@ -4025,7 +3948,6 @@ impl Config {
             guardian_policy_config,
             model_reasoning_effort: cfg.model_reasoning_effort,
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
-            orchestrated_mode: cfg.orchestrated_mode.into(),
             model_reasoning_summary: cfg.model_reasoning_summary,
             model_catalog,
             model_verbosity: cfg.model_verbosity,

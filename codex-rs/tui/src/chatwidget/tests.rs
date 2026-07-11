@@ -106,7 +106,6 @@ pub(super) use codex_app_server_protocol::ToolRequestUserInputOption;
 pub(super) use codex_app_server_protocol::ToolRequestUserInputParams;
 pub(super) use codex_app_server_protocol::ToolRequestUserInputQuestion;
 pub(super) use codex_app_server_protocol::Turn as AppServerTurn;
-pub(super) use codex_app_server_protocol::TurnActiveRoleUpdatedNotification;
 pub(super) use codex_app_server_protocol::TurnCompletedNotification;
 pub(super) use codex_app_server_protocol::TurnError as AppServerTurnError;
 pub(super) use codex_app_server_protocol::TurnStartedNotification;

@@ -401,21 +401,7 @@ impl ChatWidget {
     ///
     /// Unknown ids are deduplicated in insertion order for warning messages.
     fn status_line_items_with_invalids(&self) -> (Vec<StatusLineItem>, Vec<String>) {
-        let ids = self.configured_status_line_items();
-        let configured_empty = ids.is_empty();
-        let (mut items, invalid) = parse_items_with_invalids(ids);
-        if self.active_mode_kind() == ModeKind::Orchestrated
-            && !configured_empty
-            && !items.iter().any(|item| {
-                matches!(
-                    item,
-                    StatusLineItem::ModelName | StatusLineItem::ModelWithReasoning
-                )
-            })
-        {
-            items.insert(0, StatusLineItem::ModelWithReasoning);
-        }
-        (items, invalid)
+        parse_items_with_invalids(self.configured_status_line_items())
     }
 
     pub(super) fn configured_status_line_items(&self) -> Vec<String> {
@@ -668,7 +654,7 @@ impl ChatWidget {
     /// git metadata.
     pub(super) fn status_line_value_for_item(&mut self, item: StatusLineItem) -> Option<String> {
         match item {
-            StatusLineItem::ModelName => Some(self.model_status_display_name()),
+            StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
             StatusLineItem::ModelWithReasoning => Some(self.model_with_reasoning_display_name()),
             StatusLineItem::Reasoning => Some(self.reasoning_display_name()),
             StatusLineItem::CurrentDir => {
@@ -864,7 +850,7 @@ impl ChatWidget {
                 .status_line_value_for_item(StatusLineItem::FastMode)
                 .map(|value| Self::truncate_terminal_title_part(value, /*max_chars*/ 32)),
             TerminalTitleItem::Model => Some(Self::truncate_terminal_title_part(
-                self.model_status_display_name(),
+                self.model_display_name().to_string(),
                 /*max_chars*/ 32,
             )),
             TerminalTitleItem::ModelWithReasoning => Some(Self::truncate_terminal_title_part(
@@ -885,8 +871,7 @@ impl ChatWidget {
     }
 
     fn model_with_reasoning_display_name(&self) -> String {
-        let (model, effort) = self.active_model_and_reasoning_effort();
-        let label = Self::status_line_reasoning_effort_label(effort.as_ref());
+        let label = self.reasoning_display_name();
         let service_tier_label = self
             .current_service_tier()
             .and_then(|service_tier| {
@@ -898,46 +883,7 @@ impl ChatWidget {
             .filter(|_| self.has_chatgpt_account)
             .map(|tier| format!(" {tier}"))
             .unwrap_or_default();
-        format!("{model} {label}{service_tier_label}")
-    }
-
-    fn model_status_display_name(&self) -> String {
-        self.active_model_and_reasoning_effort().0
-    }
-
-    fn active_model_and_reasoning_effort(&self) -> (String, Option<ReasoningEffortConfig>) {
-        let current_model = self.model_display_name().to_string();
-        let current_effort = self.effective_reasoning_effort();
-        if self.active_mode_kind() != ModeKind::Orchestrated {
-            return (current_model, current_effort);
-        }
-        match self.active_orchestrated_role.as_deref() {
-            Some("worker" | "worker-plan") => (
-                self.config
-                    .orchestrated_mode
-                    .worker_model
-                    .clone()
-                    .unwrap_or(current_model),
-                self.config
-                    .orchestrated_mode
-                    .worker_reasoning_effort
-                    .clone()
-                    .or(current_effort),
-            ),
-            Some("explorer" | "plan-evidence") => (
-                self.config
-                    .orchestrated_mode
-                    .explorer_model
-                    .clone()
-                    .unwrap_or(current_model),
-                self.config
-                    .orchestrated_mode
-                    .explorer_reasoning_effort
-                    .clone()
-                    .or(current_effort),
-            ),
-            Some(_) | None => (current_model, current_effort),
-        }
+        format!("{} {label}{service_tier_label}", self.model_display_name())
     }
 
     /// Computes the compact runtime status label used by word-based status items.

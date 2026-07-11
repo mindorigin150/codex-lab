@@ -2611,7 +2611,6 @@
       "description": "Initial collaboration mode to use when the TUI starts.",
       "enum": [
         "plan",
-        "orchestrated",
         "default"
       ],
       "type": "string"
@@ -4709,25 +4708,6 @@
       ],
       "type": "object"
     },
-    "ThreadOrchestratedRoleTokenUsage": {
-      "properties": {
-        "model": {
-          "type": "string"
-        },
-        "role": {
-          "type": "string"
-        },
-        "tokenUsage": {
-          "$ref": "#/definitions/TokenUsageBreakdown"
-        }
-      },
-      "required": [
-        "model",
-        "role",
-        "tokenUsage"
-      ],
-      "type": "object"
-    },
     "ThreadRealtimeAudioChunk": {
       "description": "EXPERIMENTAL - thread realtime audio chunk.",
       "properties": {
@@ -5122,13 +5102,6 @@
             "null"
           ]
         },
-        "orchestratedRoleUsage": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/ThreadOrchestratedRoleTokenUsage"
-          },
-          "type": "array"
-        },
         "total": {
           "$ref": "#/definitions/TokenUsageBreakdown"
         }
@@ -5266,27 +5239,6 @@
         "id",
         "items",
         "status"
-      ],
-      "type": "object"
-    },
-    "TurnActiveRoleUpdatedNotification": {
-      "properties": {
-        "role": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "turnId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "threadId",
-        "turnId"
       ],
       "type": "object"
     },
@@ -6066,26 +6018,6 @@
         "params"
       ],
       "title": "Turn/startedNotification",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "method": {
-          "enum": [
-            "turn/activeRole/updated"
-          ],
-          "title": "Turn/activeRole/updatedNotificationMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/TurnActiveRoleUpdatedNotification"
-        }
-      },
-      "required": [
-        "method",
-        "params"
-      ],
-      "title": "Turn/activeRole/updatedNotification",
       "type": "object"
     },
     {

@@ -1,4 +1,3 @@
-use crate::agent::role::WORKER_ROLE_NAME;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -227,9 +226,6 @@ impl ToolRouter {
 
         // Keep the legacy ToolInvocation.turn field tied to the same request state until handlers migrate.
         let turn = Arc::clone(&step_context.turn);
-        if turn.orchestrated_role == Some(WORKER_ROLE_NAME) && tool_name.name != "exec_command" {
-            turn.orchestrated_execution_ledger.lock().await.invalidate();
-        }
         let invocation = ToolInvocation {
             session,
             turn,

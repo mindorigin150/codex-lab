@@ -11,8 +11,6 @@ use std::time::Instant;
 use codex_app_server_protocol::CommandExecutionSource as ExecCommandSource;
 use codex_protocol::parse_command::ParsedCommand;
 
-pub(crate) use crate::orchestrated_role::Attribution as ExecCellAttribution;
-
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CommandOutput {
     pub(crate) exit_code: i32,
@@ -37,7 +35,6 @@ pub(crate) struct ExecCall {
 #[derive(Debug)]
 pub(crate) struct ExecCell {
     pub(crate) calls: Vec<ExecCall>,
-    pub(crate) attribution: ExecCellAttribution,
     animations_enabled: bool,
 }
 
@@ -45,7 +42,6 @@ impl ExecCell {
     pub(crate) fn new(call: ExecCall, animations_enabled: bool) -> Self {
         Self {
             calls: vec![call],
-            attribution: ExecCellAttribution::Unattributed,
             animations_enabled,
         }
     }
@@ -57,7 +53,6 @@ impl ExecCell {
         parsed: Vec<ParsedCommand>,
         source: ExecCommandSource,
         interaction_input: Option<String>,
-        attribution: ExecCellAttribution,
     ) -> Option<Self> {
         let call = ExecCall {
             call_id,
@@ -69,13 +64,9 @@ impl ExecCell {
             duration: None,
             interaction_input,
         };
-        if self.attribution == attribution
-            && self.is_exploring_cell()
-            && Self::is_exploring_call(&call)
-        {
+        if self.is_exploring_cell() && Self::is_exploring_call(&call) {
             Some(Self {
                 calls: [self.calls.clone(), vec![call]].concat(),
-                attribution,
                 animations_enabled: self.animations_enabled,
             })
         } else {

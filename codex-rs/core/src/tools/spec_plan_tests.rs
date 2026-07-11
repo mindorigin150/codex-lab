@@ -8,7 +8,6 @@ use codex_mcp::ToolInfo;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ApplyPatchToolType;
@@ -492,99 +491,6 @@ async fn shell_family_registers_visible_unified_exec_and_hidden_legacy_shell() {
     plan.assert_registered_contains(&["exec_command", "write_stdin", "shell_command"]);
     assert_eq!(plan.exposure("shell_command"), ToolExposure::Hidden);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
-}
-
-#[tokio::test]
-async fn inspection_roles_get_shell_transport_without_apply_patch() {
-    for role in [super::EXPLORER_ROLE_NAME, super::PLAN_EVIDENCE_ROLE_NAME] {
-        let plan = probe(|turn| {
-            set_features(
-                turn,
-                &[
-                    Feature::ShellTool,
-                    Feature::UnifiedExec,
-                    Feature::ExecPermissionApprovals,
-                ],
-            );
-            set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
-            turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
-            turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
-            turn.orchestrated_role = Some(role);
-        })
-        .await;
-
-        plan.assert_visible_contains(&["exec_command", "write_stdin"]);
-        plan.assert_visible_lacks(&["shell_command", "apply_patch"]);
-        plan.assert_registered_contains(&["exec_command", "write_stdin", "shell_command"]);
-        plan.assert_registered_lacks(&["apply_patch"]);
-        assert_eq!(plan.exposure("shell_command"), ToolExposure::Hidden);
-        let exec_command = plan.visible_spec("exec_command");
-        for inherited_parameter in [
-            "shell",
-            "tty",
-            "login",
-            "sandbox_permissions",
-            "additional_permissions",
-            "justification",
-            "prefix_rule",
-        ] {
-            assert!(
-                has_parameter(exec_command, inherited_parameter),
-                "{role} exec_command schema should include `{inherited_parameter}`"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn pre_execution_orchestrated_phases_have_no_tools() {
-    for role in [
-        super::TASK_CONTRACT_ROLE_NAME,
-        super::WORKER_PLAN_ROLE_NAME,
-        super::PLAN_REVIEW_ROLE_NAME,
-        super::RESULT_REVIEW_ROLE_NAME,
-    ] {
-        let plan = probe(|turn| {
-            set_features(
-                turn,
-                &[
-                    Feature::ShellTool,
-                    Feature::UnifiedExec,
-                    Feature::CodeMode,
-                    Feature::CodeModeOnly,
-                ],
-            );
-            turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
-            turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
-            turn.orchestrated_role = Some(role);
-        })
-        .await;
-
-        assert_eq!(plan.visible_names, Vec::<String>::new(), "phase: {role}");
-        assert_eq!(plan.registered_names, Vec::<String>::new(), "phase: {role}");
-    }
-}
-
-#[tokio::test]
-async fn orchestrated_root_tools_require_plan_approval() {
-    let unapproved = probe(|turn| {
-        turn.collaboration_mode.mode = ModeKind::Orchestrated;
-        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
-    })
-    .await;
-    assert_eq!(unapproved.visible_names, Vec::<String>::new());
-    assert_eq!(unapproved.registered_names, Vec::<String>::new());
-
-    let approved = probe(|turn| {
-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
-        turn.collaboration_mode.mode = ModeKind::Orchestrated;
-        turn.orchestrated_execution_approved
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
-    })
-    .await;
-    approved.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
-    approved.assert_visible_lacks(&["apply_patch", "exec_command", "shell_command"]);
 }
 
 #[tokio::test]

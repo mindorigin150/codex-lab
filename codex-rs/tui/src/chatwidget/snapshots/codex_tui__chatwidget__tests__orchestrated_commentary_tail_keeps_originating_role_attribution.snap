@@ -1,7 +1,0 @@
----
-source: tui/src/chatwidget/tests/exec_flow.rs
-expression: live_tail
----
-• Explorer  Name       Notes
-  ━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━
-   history    Inspect orchestration
