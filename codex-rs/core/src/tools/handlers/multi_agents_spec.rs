@@ -721,7 +721,7 @@ fn spawn_agent_tool_description_v2(
         {agent_role_guidance}
         Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
-The spawned agent will have the same tools as you and the ability to spawn its own subagents.
+The spawned agent will have the same tools allowed at its configured depth. With the default `agents.max_depth = 1`, spawned subagents are leaves and cannot delegate further.
 {inherited_model_guidance}
 Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.

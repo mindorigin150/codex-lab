@@ -213,21 +213,16 @@ pub fn intersect_runtime_permission_profiles(
     match (requested, granted) {
         (PermissionProfile::Disabled, granted) => granted,
         (requested, PermissionProfile::Disabled) => requested,
-        (
-            PermissionProfile::External { .. },
-            PermissionProfile::External { .. },
-        ) => PermissionProfile::External { network },
-        (
-            PermissionProfile::Managed { file_system, .. },
-            PermissionProfile::External { .. },
-        )
-        | (
-            PermissionProfile::External { .. },
-            PermissionProfile::Managed { file_system, .. },
-        ) => PermissionProfile::Managed {
-            file_system,
-            network,
-        },
+        (PermissionProfile::External { .. }, PermissionProfile::External { .. }) => {
+            PermissionProfile::External { network }
+        }
+        (PermissionProfile::Managed { file_system, .. }, PermissionProfile::External { .. })
+        | (PermissionProfile::External { .. }, PermissionProfile::Managed { file_system, .. }) => {
+            PermissionProfile::Managed {
+                file_system,
+                network,
+            }
+        }
         (
             PermissionProfile::Managed {
                 file_system: requested_file_system,
@@ -290,25 +285,18 @@ fn intersect_managed_file_system_permissions(
                 .cloned()
                 .collect::<Vec<_>>();
 
-            append_intersected_grants(
-                &requested_entries,
-                &granted_policy,
-                cwd,
-                &mut entries,
-            );
-            append_intersected_grants(
-                &granted_entries,
-                &requested_policy,
-                cwd,
-                &mut entries,
-            );
+            append_intersected_grants(&requested_entries, &granted_policy, cwd, &mut entries);
+            append_intersected_grants(&granted_entries, &requested_policy, cwd, &mut entries);
 
             ManagedFileSystemPermissions::Restricted {
                 entries,
-                glob_scan_max_depth: requested_glob_scan_max_depth
-                    .map(usize::from)
-                    .max(granted_glob_scan_max_depth.map(usize::from))
-                    .and_then(NonZeroUsize::new),
+                glob_scan_max_depth: merge_glob_scan_max_depth(
+                    &requested_entries,
+                    requested_glob_scan_max_depth.map(usize::from),
+                    &granted_entries,
+                    granted_glob_scan_max_depth.map(usize::from),
+                )
+                .and_then(NonZeroUsize::new),
             }
         }
     }
@@ -344,11 +332,29 @@ fn access_for_permission_entry(
     entry: &FileSystemSandboxEntry,
     cwd: &Path,
 ) -> FileSystemAccessMode {
-    if !matches!(policy.kind, codex_protocol::permissions::FileSystemSandboxKind::Restricted) {
+    if !matches!(
+        policy.kind,
+        codex_protocol::permissions::FileSystemSandboxKind::Restricted
+    ) {
         return FileSystemAccessMode::Write;
     }
     if let Some(path) = permission_entry_probe_path(entry, cwd) {
         return policy.resolve_access_with_cwd(path.as_path(), cwd);
+    }
+
+    if matches!(
+        &entry.path,
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::Minimal
+        }
+    ) {
+        if let Some(access) =
+            maximum_access_for_matching_special_path(policy, &FileSystemSpecialPath::Minimal)
+        {
+            return access;
+        }
+        return maximum_access_for_matching_special_path(policy, &FileSystemSpecialPath::Root)
+            .unwrap_or(FileSystemAccessMode::Deny);
     }
 
     policy
@@ -360,6 +366,22 @@ fn access_for_permission_entry(
         .unwrap_or(FileSystemAccessMode::Deny)
 }
 
+fn maximum_access_for_matching_special_path(
+    policy: &FileSystemSandboxPolicy,
+    value: &FileSystemSpecialPath,
+) -> Option<FileSystemAccessMode> {
+    policy
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.path {
+            FileSystemPath::Special {
+                value: candidate_value,
+            } if candidate_value == value => Some(entry.access),
+            _ => None,
+        })
+        .max()
+}
+
 fn permission_entry_probe_path(
     entry: &FileSystemSandboxEntry,
     cwd: &Path,
@@ -368,10 +390,9 @@ fn permission_entry_probe_path(
         FileSystemPath::Path { path } => Some(path.clone()),
         FileSystemPath::GlobPattern { .. } => None,
         FileSystemPath::Special { value } => match value {
-            FileSystemSpecialPath::Root => AbsolutePathBuf::from_absolute_path(
-                cwd.ancestors().last()?,
-            )
-            .ok(),
+            FileSystemSpecialPath::Root => {
+                AbsolutePathBuf::from_absolute_path(cwd.ancestors().last()?).ok()
+            }
             FileSystemSpecialPath::ProjectRoots { .. } => None,
             FileSystemSpecialPath::Tmpdir => std::env::var_os("TMPDIR")
                 .filter(|value| !value.is_empty())

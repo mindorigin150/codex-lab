@@ -225,6 +225,7 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     config.cwd = turn_cwd;
     let role_permission_profile = config.permissions.effective_permission_profile();
     let parent_permission_profile = turn.permission_profile();
+    let parent_network_proxy = turn.config.permissions.network.clone();
     #[allow(deprecated)]
     let permission_cwd = turn.cwd.as_path();
     let permission_profile = intersect_runtime_permission_profiles(
@@ -232,6 +233,12 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
         parent_permission_profile,
         permission_cwd,
     );
+    // Role layers must not replace a live parent proxy with a broader policy. Network proxy
+    // specs contain domain and local-socket capabilities that are more granular than the coarse
+    // runtime profile, and there is no lossless generic intersection for two independently
+    // constrained specs. Keep the parent's spec as the hard runtime ceiling. Built-in read-only
+    // roles still disable network through `permission_profile` above.
+    config.permissions.network = parent_network_proxy;
     config
         .permissions
         .set_permission_profile(permission_profile)

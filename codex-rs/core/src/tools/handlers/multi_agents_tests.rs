@@ -3,6 +3,7 @@ use crate::ThreadManager;
 use crate::agent::role::apply_role_to_config;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
+use crate::config::NetworkProxySpec;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::local_agent_graph_store_from_state_db;
@@ -25,6 +26,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::built_in_model_providers;
+use codex_network_proxy::NetworkProxyConfig;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -429,6 +431,11 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
 
 #[tokio::test]
 async fn multi_agent_v2_explorer_defaults_to_fresh_context() {
+    #[derive(Deserialize)]
+    struct V2SpawnResult {
+        task_name: String,
+    }
+
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let mut config = (*turn.config).clone();
@@ -460,7 +467,7 @@ async fn multi_agent_v2_explorer_defaults_to_fresh_context() {
         .await
         .expect("explorer should spawn without inherited context");
     let (content, _) = expect_text_output(output);
-    let result: SpawnAgentResult =
+    let result: V2SpawnResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
     let child_thread_id = session
         .services
@@ -515,7 +522,8 @@ async fn multi_agent_v2_explorer_rejects_inherited_context() {
                 })),
             ))
             .await
-            .expect_err("explorer context inheritance should be rejected");
+            .err()
+            .expect("explorer context inheritance should be rejected");
 
         assert_eq!(
             err,
@@ -2595,13 +2603,7 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_spawn_agent_ignores_configured_max_depth() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        task_name: String,
-        nickname: Option<String>,
-    }
-
+async fn multi_agent_v2_spawn_agent_rejects_when_depth_limit_exceeded() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let mut config = (*turn.config).clone();
@@ -2636,16 +2638,17 @@ async fn multi_agent_v2_spawn_agent_ignores_configured_max_depth() {
             "fork_turns": "none"
         })),
     );
-    let output = SpawnAgentHandlerV2::default()
+    let err = SpawnAgentHandlerV2::default()
         .handle(invocation)
         .await
-        .expect("multi-agent v2 spawn should ignore max depth");
-    let (content, success) = expect_text_output(output);
-    let result: SpawnAgentResult =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    assert_eq!(result.task_name, "/root/parent/child");
-    assert_eq!(result.nickname, None);
-    assert_eq!(success, Some(true));
+        .err()
+        .expect("multi-agent v2 spawn should enforce max depth");
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Agent depth limit reached. Solve the task yourself.".to_string()
+        )
+    );
 }
 
 #[tokio::test]
@@ -4687,6 +4690,88 @@ async fn spawn_runtime_permissions_apply_role_and_parent_intersection() {
         explorer_config.permissions.effective_permission_profile(),
         PermissionProfile::read_only()
     );
+}
+
+#[tokio::test]
+async fn spawn_runtime_overrides_preserve_parent_network_proxy_ceiling() {
+    let (_session, mut turn) = make_session_and_context().await;
+    let mut parent_proxy_config = NetworkProxyConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    parent_proxy_config.set_allowed_domains(vec!["parent.example".to_string()]);
+    let parent_proxy = NetworkProxySpec::from_config_and_constraints(
+        parent_proxy_config,
+        /*requirements*/ None,
+        &PermissionProfile::Disabled,
+    )
+    .expect("parent proxy spec");
+    let mut parent_config = (*turn.config).clone();
+    parent_config.permissions.network = Some(parent_proxy.clone());
+    parent_config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("unrestricted parent profile should be accepted");
+    turn.config = Arc::new(parent_config);
+    turn.permission_profile = PermissionProfile::Disabled;
+
+    let mut child_config = build_agent_spawn_config(
+        &BaseInstructions {
+            text: "base".to_string(),
+        },
+        &turn,
+    )
+    .expect("spawn config");
+    let mut role_proxy_config = NetworkProxyConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    role_proxy_config.set_allowed_domains(vec!["role.example".to_string()]);
+    child_config.permissions.network = Some(
+        NetworkProxySpec::from_config_and_constraints(
+            role_proxy_config,
+            /*requirements*/ None,
+            &PermissionProfile::Disabled,
+        )
+        .expect("role proxy spec"),
+    );
+
+    apply_spawn_agent_runtime_overrides(&mut child_config, &turn)
+        .expect("parent runtime network proxy should apply");
+
+    assert_eq!(child_config.permissions.network, Some(parent_proxy));
+}
+
+#[tokio::test]
+async fn spawn_runtime_overrides_do_not_create_proxy_absent_from_parent() {
+    let (_session, turn) = make_session_and_context().await;
+    assert_eq!(turn.config.permissions.network, None);
+    let mut child_config = build_agent_spawn_config(
+        &BaseInstructions {
+            text: "base".to_string(),
+        },
+        &turn,
+    )
+    .expect("spawn config");
+    let mut role_proxy_config = NetworkProxyConfig {
+        enabled: true,
+        allow_local_binding: true,
+        ..Default::default()
+    };
+    role_proxy_config.set_allowed_domains(vec!["role.example".to_string()]);
+    child_config.permissions.network = Some(
+        NetworkProxySpec::from_config_and_constraints(
+            role_proxy_config,
+            /*requirements*/ None,
+            &PermissionProfile::Disabled,
+        )
+        .expect("role proxy spec"),
+    );
+
+    apply_spawn_agent_runtime_overrides(&mut child_config, &turn)
+        .expect("parent runtime network policy should apply");
+
+    assert_eq!(child_config.permissions.network, None);
 }
 
 #[tokio::test]

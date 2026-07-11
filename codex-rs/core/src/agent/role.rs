@@ -74,12 +74,19 @@ async fn apply_role_to_config_inner(
     }
     let preserve_current_provider = role_layer_toml.get("model_provider").is_none();
     let preserve_current_service_tier = role_layer_toml.get("service_tier").is_none();
+    let preserve_current_model = role_layer_toml.get("model").is_none();
+    let preserve_current_reasoning_effort = role_layer_toml.get("model_reasoning_effort").is_none();
+    let preserve_current_reasoning_summary =
+        role_layer_toml.get("model_reasoning_summary").is_none();
 
     *config = reload::build_next_config(
         config,
         role_layer_toml,
         preserve_current_provider,
         preserve_current_service_tier,
+        preserve_current_model,
+        preserve_current_reasoning_effort,
+        preserve_current_reasoning_summary,
     )
     .await?;
     Ok(())
@@ -137,22 +144,32 @@ mod reload {
         role_layer_toml: TomlValue,
         preserve_current_provider: bool,
         preserve_current_service_tier: bool,
+        preserve_current_model: bool,
+        preserve_current_reasoning_effort: bool,
+        preserve_current_reasoning_summary: bool,
     ) -> anyhow::Result<Config> {
         let config_layer_stack = build_config_layer_stack(config, &role_layer_toml)?;
         let merged_config = deserialize_effective_config(config, &config_layer_stack)?;
 
-        let next_config = Config::load_config_with_layer_stack(
+        let mut next_config = Config::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             merged_config,
             reload_overrides(
                 config,
                 preserve_current_provider,
                 preserve_current_service_tier,
+                preserve_current_model,
             ),
             config.codex_home.clone(),
             config_layer_stack,
         )
         .await?;
+        if preserve_current_reasoning_effort {
+            next_config.model_reasoning_effort = config.model_reasoning_effort.clone();
+        }
+        if preserve_current_reasoning_summary {
+            next_config.model_reasoning_summary = config.model_reasoning_summary;
+        }
         Ok(next_config)
     }
 
@@ -205,9 +222,14 @@ mod reload {
         config: &Config,
         preserve_current_provider: bool,
         preserve_current_service_tier: bool,
+        preserve_current_model: bool,
     ) -> ConfigOverrides {
         ConfigOverrides {
             cwd: Some(config.cwd.to_path_buf()),
+            workspace_roots: Some(config.workspace_roots.clone()),
+            model: preserve_current_model
+                .then(|| config.model.clone())
+                .flatten(),
             model_provider: preserve_current_provider.then(|| config.model_provider_id.clone()),
             service_tier: preserve_current_service_tier.then(|| config.service_tier.clone()),
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),

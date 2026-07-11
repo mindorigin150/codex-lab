@@ -1431,6 +1431,37 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_hides_collaboration_tools_at_configured_max_depth() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| config.agent_max_depth = 1);
+        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: codex_protocol::ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: Some("explorer".to_string()),
+        });
+    })
+    .await;
+
+    for tool_name in [
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+    ] {
+        plan.assert_visible_lacks(&[tool_name]);
+        assert!(
+            !plan.registered_names.contains(&tool_name.to_string()),
+            "expected {tool_name} runtime to be absent at max depth"
+        );
+    }
+}
+
+#[tokio::test]
 async fn multi_agent_v2_namespace_is_supported_by_bedrock_provider() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);

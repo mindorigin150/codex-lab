@@ -18,7 +18,6 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use dunce::canonicalize;
 use pretty_assertions::assert_eq;
-#[cfg(unix)]
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -118,6 +117,111 @@ fn runtime_profile_intersection_downgrades_workspace_write_to_read_only() {
         FileSystemAccessMode::Read
     );
     assert_eq!(policy.has_full_disk_write_access(), false);
+}
+
+#[test]
+fn runtime_profile_intersection_preserves_minimal_platform_roots_under_root_read() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let parent = managed_runtime_profile(
+        vec![FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            access: FileSystemAccessMode::Read,
+        }],
+        NetworkSandboxPolicy::Restricted,
+    );
+
+    let intersected = intersect_runtime_permission_profiles(
+        RuntimePermissionProfile::read_only(),
+        parent,
+        temp_dir.path(),
+    );
+    let policy = intersected.file_system_sandbox_policy();
+
+    assert!(policy.include_platform_defaults());
+    assert!(policy.entries.iter().any(|entry| {
+        entry.access == FileSystemAccessMode::Read
+            && matches!(
+                &entry.path,
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Minimal
+                }
+            )
+    }));
+}
+
+#[test]
+fn runtime_profile_intersection_preserves_unbounded_deny_glob_scan_depth() {
+    fn profile_with_depth(
+        entries: Vec<FileSystemSandboxEntry>,
+        glob_scan_max_depth: Option<usize>,
+    ) -> RuntimePermissionProfile {
+        RuntimePermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Restricted {
+                entries,
+                glob_scan_max_depth: glob_scan_max_depth.and_then(std::num::NonZeroUsize::new),
+            },
+            network: NetworkSandboxPolicy::Restricted,
+        }
+    }
+
+    fn root_read() -> FileSystemSandboxEntry {
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+        }
+    }
+
+    fn deny_glob(pattern: &str) -> FileSystemSandboxEntry {
+        FileSystemSandboxEntry {
+            path: FileSystemPath::GlobPattern {
+                pattern: pattern.to_string(),
+            },
+            access: FileSystemAccessMode::Deny,
+        }
+    }
+
+    fn intersection_depth(
+        requested: RuntimePermissionProfile,
+        granted: RuntimePermissionProfile,
+        cwd: &Path,
+    ) -> Option<usize> {
+        let RuntimePermissionProfile::Managed {
+            file_system:
+                ManagedFileSystemPermissions::Restricted {
+                    glob_scan_max_depth,
+                    ..
+                },
+            ..
+        } = intersect_runtime_permission_profiles(requested, granted, cwd)
+        else {
+            panic!("intersection should remain a restricted managed profile");
+        };
+        glob_scan_max_depth.map(usize::from)
+    }
+
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let requested =
+        profile_with_depth(vec![root_read(), deny_glob("**/requested-secret/**")], None);
+    let granted = profile_with_depth(
+        vec![root_read(), deny_glob("**/granted-secret/**")],
+        Some(3),
+    );
+    assert_eq!(
+        intersection_depth(requested, granted, temp_dir.path()),
+        None
+    );
+
+    let requested =
+        profile_with_depth(vec![root_read(), deny_glob("**/requested-secret/**")], None);
+    let granted = profile_with_depth(vec![root_read()], Some(3));
+    assert_eq!(
+        intersection_depth(requested, granted, temp_dir.path()),
+        None
+    );
 }
 
 #[cfg(unix)]

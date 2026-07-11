@@ -6,6 +6,7 @@ use codex_config::ConfigLayerStackOrdering;
 use codex_core_plugins::PluginsManager;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use std::fs;
@@ -117,6 +118,30 @@ async fn apply_reviewer_role_enforces_read_only() {
     assert_eq!(
         config.permissions.effective_permission_profile(),
         codex_protocol::models::PermissionProfile::read_only()
+    );
+}
+
+#[tokio::test]
+async fn apply_role_preserves_runtime_workspace_roots() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let primary_root = AbsolutePathBuf::from_absolute_path(home.path().join("primary"))
+        .expect("primary root should be absolute");
+    let secondary_root = AbsolutePathBuf::from_absolute_path(home.path().join("secondary"))
+        .expect("secondary root should be absolute");
+    let workspace_roots = vec![primary_root, secondary_root];
+    config.workspace_roots = workspace_roots.clone();
+    config
+        .permissions
+        .set_workspace_roots(workspace_roots.clone());
+
+    apply_role_to_config(&mut config, Some("explorer"))
+        .await
+        .expect("explorer role should apply");
+
+    assert_eq!(config.workspace_roots, workspace_roots);
+    assert_eq!(
+        config.permissions.workspace_roots(),
+        config.workspace_roots.as_slice()
     );
 }
 
