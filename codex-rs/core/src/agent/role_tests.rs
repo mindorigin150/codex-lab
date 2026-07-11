@@ -558,7 +558,15 @@ fn spawn_tool_spec_marks_role_locked_service_tier() {
 }
 
 #[test]
-fn built_in_config_file_contents_resolves_explorer_only() {
+fn built_in_config_file_contents_resolves_read_only_roles() {
+    assert_eq!(
+        built_in::config_file_contents(Path::new("explorer.toml")),
+        Some("sandbox_mode = \"read-only\"\n")
+    );
+    assert_eq!(
+        built_in::config_file_contents(Path::new("reviewer.toml")),
+        Some("sandbox_mode = \"read-only\"\n")
+    );
     assert_eq!(
         built_in::config_file_contents(Path::new("missing.toml")),
         None

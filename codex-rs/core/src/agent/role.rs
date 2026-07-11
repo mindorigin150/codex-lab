@@ -27,6 +27,9 @@ use toml::Value as TomlValue;
 
 /// The role name used when a caller omits `agent_type`.
 pub const DEFAULT_ROLE_NAME: &str = "default";
+pub(crate) const WORKER_ROLE_NAME: &str = "worker";
+pub(crate) const EXPLORER_ROLE_NAME: &str = "explorer";
+pub(crate) const REVIEWER_ROLE_NAME: &str = "reviewer";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
 
 /// Applies a named role layer to `config` while preserving caller-owned provider settings.
@@ -320,19 +323,28 @@ mod built_in {
                 (
                     "explorer".to_string(),
                     AgentRoleConfig {
-                        description: Some(r#"Use `explorer` for specific codebase questions.
-Explorers are fast and authoritative.
-They must be used to ask specific, well-scoped questions on the codebase.
+                        description: Some(r#"Use `explorer` early for bounded, read-heavy codebase investigation in both Plan and Default modes.
 Rules:
-- In order to avoid redundant work, you should avoid exploring the same problem that explorers have already covered. Typically, you should trust the explorer results without additional verification. You are still allowed to inspect the code yourself to gain the needed context!
-- You are encouraged to spawn up multiple explorers in parallel when you have multiple distinct questions to ask about the codebase that can be answered independently. This allows you to get more information faster without waiting for one question to finish before asking the next. While waiting for the explorer results, you can continue working on other local tasks that do not depend on those results. This parallelism is a key advantage of delegation, so use it whenever you have multiple questions to ask.
+- Explorers always start with fresh context. Put the concrete question, scope, constraints, and expected evidence in the task instead of relying on inherited conversation history.
+- Delegate early when investigation is read-heavy, spans modules, or has independent questions. Spawn multiple explorers only for genuinely independent scopes.
+- Ask for concise conclusions, `file:line` evidence, confidence, and risks rather than long logs or source dumps.
+- When an explorer's result blocks the next step, wait for it with a long timeout. Do not repeat the same searches or code reading while it runs; after it returns, perform only necessary spot-checks.
 - Reuse existing explorers for related questions."#.to_string()),
                         config_file: Some("explorer.toml".to_string().parse().unwrap_or_default()),
                         nickname_candidates: None,
                     }
                 ),
                 (
-                    "worker".to_string(),
+                    REVIEWER_ROLE_NAME.to_string(),
+                    AgentRoleConfig {
+                        description: Some(r#"Use `reviewer` for read-only review of high-risk changes such as security, concurrency, state consistency, cross-module refactors, or changes produced by multiple workers.
+Return actionable findings with severity and `file:line` evidence. Do not modify files or delegate further work."#.to_string()),
+                        config_file: Some("reviewer.toml".to_string().parse().unwrap_or_default()),
+                        nickname_candidates: None,
+                    }
+                ),
+                (
+                    WORKER_ROLE_NAME.to_string(),
                     AgentRoleConfig {
                         description: Some(r#"Use for execution and production work.
 Typical tasks:
@@ -372,9 +384,11 @@ Rules:
     /// Resolves a built-in role `config_file` path to embedded content.
     pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
         const EXPLORER: &str = include_str!("builtins/explorer.toml");
+        const REVIEWER: &str = include_str!("builtins/reviewer.toml");
         const AWAITER: &str = include_str!("builtins/awaiter.toml");
         match path.to_str()? {
             "explorer.toml" => Some(EXPLORER),
+            "reviewer.toml" => Some(REVIEWER),
             "awaiter.toml" => Some(AWAITER),
             _ => None,
         }

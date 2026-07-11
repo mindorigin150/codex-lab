@@ -727,7 +727,7 @@ Only call this tool for a concrete, bounded subtask that can run independently a
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
 
-Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
+Explorer agents always use fresh context: omit `fork_turns` or pass `fork_turns="none"`, and include all necessary scope and evidence requirements in the task. Other roles default to `fork_turns="all"`; pass `fork_turns="none"` for fresh context or a positive integer string for a bounded history fork."#
     );
 
     if let Some(usage_hint_text) = usage_hint_text {
