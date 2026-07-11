@@ -22,7 +22,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -200,7 +201,10 @@ pub(super) async fn run_for_input(
         TurnInput::InterAgentCommunication(communication) => communication.trigger_turn,
         TurnInput::ResponseItem(_) => false,
     });
-    if turn_context.collaboration_mode.mode != ModeKind::Orchestrated || !starts_orchestrated_flow {
+    if turn_context.collaboration_mode.mode != ModeKind::Orchestrated
+        || !turn_context.config.orchestrated_mode.enabled
+        || !starts_orchestrated_flow
+    {
         return Ok(Outcome::Skipped);
     }
     if input
@@ -218,39 +222,56 @@ pub(super) async fn run_for_input(
         .store(false, Ordering::Relaxed);
 
     let max_turn_seconds = turn_context.config.orchestrated_mode.max_turn_seconds;
-    let phase_result = tokio::time::timeout(
-        Duration::from_secs(max_turn_seconds),
-        run_phases(
+    let phase_cancellation = cancellation_token.child_token();
+    let phase_result = {
+        let phase_future = run_phases(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
             turn_extension_data,
             turn_diff_tracker,
             client_session,
-            cancellation_token,
-        ),
-    )
-    .await;
+            phase_cancellation.clone(),
+        );
+        tokio::pin!(phase_future);
+        tokio::select! {
+            result = &mut phase_future => Some(result),
+            _ = tokio::time::sleep(Duration::from_secs(max_turn_seconds)) => {
+                phase_cancellation.cancel();
+                // Wait for run_phase to compact or conservatively retain its in-flight history.
+                let _ = phase_future.await;
+                None
+            }
+        }
+    };
     match phase_result {
-        Ok(Ok(true)) => Ok(Outcome::Completed),
-        Ok(Ok(false)) => {
-            append_blocked_packet(&sess, &turn_context, "review gate was not approved").await;
+        Some(Ok(true)) => Ok(Outcome::Completed),
+        Some(Ok(false)) => {
+            block_orchestration(&sess, &turn_context, "review gate was not approved").await;
             Ok(Outcome::Completed)
         }
-        Err(_) => {
+        None => {
             emit_role_update(&sess, &turn_context, None).await;
-            append_blocked_packet(&sess, &turn_context, "turn time budget exhausted").await;
+            block_orchestration(&sess, &turn_context, "internal phase time budget exhausted").await;
             Ok(Outcome::Completed)
         }
-        Ok(Err(CodexErr::SessionBudgetExceeded)) => {
+        Some(Err(CodexErr::SessionBudgetExceeded)) => {
             emit_role_update(&sess, &turn_context, None).await;
-            append_blocked_packet(&sess, &turn_context, "request or token budget exhausted").await;
+            block_orchestration(
+                &sess,
+                &turn_context,
+                "internal request or token budget exhausted",
+            )
+            .await;
             Ok(Outcome::Completed)
         }
-        Ok(Err(err @ CodexErr::TurnAborted)) => {
+        Some(Err(err @ CodexErr::TurnAborted)) => {
             emit_role_update(&sess, &turn_context, None).await;
             Err(err)
         }
-        Ok(Err(err)) => {
+        Some(Err(err)) => {
+            turn_context
+                .orchestrated_execution_approved
+                .store(false, Ordering::Relaxed);
             info!("Orchestrated internal phase error: {err:#}");
             emit_role_update(&sess, &turn_context, None).await;
             let error = err.to_codex_protocol_error();
@@ -264,7 +285,10 @@ pub(super) async fn run_for_input(
     }
 }
 
-async fn append_blocked_packet(sess: &Session, turn_context: &TurnContext, reason: &str) {
+async fn block_orchestration(sess: &Session, turn_context: &TurnContext, reason: &str) {
+    turn_context
+        .orchestrated_execution_approved
+        .store(false, Ordering::Relaxed);
     let item = ResponseItem::Message {
         id: None,
         role: "assistant".to_string(),
@@ -445,6 +469,7 @@ async fn run_phases(
             plan_evidence_gathered = true;
         };
         if !worker_plan.truncated
+            && packet_has_valid_role_prefix(&worker_plan.text, Phase::WorkerPlan)
             && !plan_evidence_truncated
             && !review_packet.truncated
             && review_approved(&review_packet.text, PLAN_REVIEW_ROLE_NAME)
@@ -597,6 +622,15 @@ fn phase_status(packet: &str, phase: Phase) -> Option<PhaseStatus> {
     }
 }
 
+fn packet_has_valid_role_prefix(packet: &str, phase: Phase) -> bool {
+    packet
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix(phase.name()))
+        .and_then(|line| line.strip_prefix(':'))
+        .is_some_and(|remainder| !remainder.trim().is_empty())
+}
+
 fn parse_status_token(line: &str, phase: Phase) -> Option<&str> {
     let line = if phase == Phase::WorkerExec {
         line.strip_prefix("orc:")
@@ -674,16 +708,8 @@ async fn run_phase(
     role_turn_context.final_output_json_schema = None;
     if matches!(phase, Phase::Explorer | Phase::PlanEvidence) {
         role_turn_context.approval_policy = Constrained::allow_only(AskForApproval::Never);
-        let mut read_only_file_system = FileSystemSandboxPolicy::read_only();
-        read_only_file_system.preserve_deny_read_restrictions_from(
-            &root_turn_context
-                .permission_profile
-                .file_system_sandbox_policy(),
-        );
-        role_turn_context.permission_profile = PermissionProfile::from_runtime_permissions(
-            &read_only_file_system,
-            NetworkSandboxPolicy::Restricted,
-        );
+        role_turn_context.permission_profile =
+            explorer_permission_profile(&root_turn_context.permission_profile);
     }
     if let Some(reasoning_effort) = phase.reasoning_effort_override(&root_turn_context) {
         role_turn_context.reasoning_effort = Some(reasoning_effort);
@@ -695,8 +721,12 @@ async fn run_phase(
     }
     let role_turn_context = Arc::new(role_turn_context);
     let mut phase_result = Ok(());
+    let mut phase_complete = false;
     for _ in 0..budget.max_phase_steps {
-        budget.claim_request()?;
+        if let Err(err) = budget.claim_request() {
+            phase_result = Err(err);
+            break;
+        }
         let step_context = sess
             .capture_step_context(Arc::clone(&role_turn_context))
             .await;
@@ -721,15 +751,24 @@ async fn run_phase(
             cancellation_token.child_token(),
         )
         .await;
-        budget.check_tokens(sess.as_ref()).await?;
+        if let Err(err) = budget.check_tokens(sess.as_ref()).await {
+            phase_result = Err(err);
+            break;
+        }
         match sampling_result {
             Ok((sampling_result, _)) if sampling_result.needs_follow_up => {}
-            Ok(_) => break,
+            Ok(_) => {
+                phase_complete = true;
+                break;
+            }
             Err(err) => {
                 phase_result = Err(err);
                 break;
             }
         }
+    }
+    if !phase_complete && phase_result.is_ok() {
+        phase_result = Err(CodexErr::SessionBudgetExceeded);
     }
 
     let packet = compact_phase_history(
@@ -741,6 +780,27 @@ async fn run_phase(
     .await;
     phase_result?;
     Ok(packet)
+}
+
+fn explorer_permission_profile(parent: &PermissionProfile) -> PermissionProfile {
+    let mut file_system = parent.file_system_sandbox_policy();
+    match file_system.kind {
+        FileSystemSandboxKind::Restricted => {
+            for entry in &mut file_system.entries {
+                if entry.access == FileSystemAccessMode::Write {
+                    entry.access = FileSystemAccessMode::Read;
+                }
+            }
+            PermissionProfile::from_runtime_permissions(
+                &file_system,
+                NetworkSandboxPolicy::Restricted,
+            )
+        }
+        FileSystemSandboxKind::Unrestricted => PermissionProfile::read_only(),
+        FileSystemSandboxKind::ExternalSandbox => PermissionProfile::External {
+            network: NetworkSandboxPolicy::Restricted,
+        },
+    }
 }
 
 async fn emit_role_update(sess: &Session, turn_context: &TurnContext, role: Option<&str>) {
@@ -856,3 +916,7 @@ fn truncate_packet(text: &str, phase: Phase) -> PhasePacket {
         execution_facts: OrchestratedExecutionFacts::default(),
     }
 }
+
+#[cfg(test)]
+#[path = "orchestrated_tests.rs"]
+mod tests;

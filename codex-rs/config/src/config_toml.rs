@@ -160,9 +160,13 @@ pub struct OrchestratedModeToml {
     pub worker_reasoning_effort: Option<ReasoningEffort>,
     pub explorer_model: Option<String>,
     pub explorer_reasoning_effort: Option<ReasoningEffort>,
+    /// Maximum model steps in one internal orchestration phase.
     pub max_phase_steps: Option<usize>,
+    /// Maximum model requests across internal phases, excluding the final Main response.
     pub max_turn_model_requests: Option<usize>,
+    /// Maximum token usage across internal phases, excluding the final Main response.
     pub max_turn_tokens: Option<u64>,
+    /// Maximum wall time for internal phases, excluding the final Main response.
     pub max_turn_seconds: Option<u64>,
     pub max_plan_revisions: Option<usize>,
     pub max_work_revisions: Option<usize>,
