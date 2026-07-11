@@ -4,6 +4,8 @@
 //! resulting `InterAgentCommunication` should wake the target immediately.
 
 use super::*;
+use crate::agent::role::EXPLORER_ROLE_NAME;
+use crate::agent::role::REVIEWER_ROLE_NAME;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::context::FunctionToolOutput;
@@ -89,6 +91,11 @@ pub(crate) async fn handle_message_string_tool(
     let receiver_agent_path = receiver_agent.agent_path.clone().ok_or_else(|| {
         FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
     })?;
+    let blocks_local_work = mode == MessageDeliveryMode::TriggerTurn
+        && receiver_agent
+            .agent_role
+            .as_deref()
+            .is_some_and(|role| matches!(role, EXPLORER_ROLE_NAME | REVIEWER_ROLE_NAME));
     let resume_config = build_agent_resume_config(turn.as_ref())?;
     session
         .services
@@ -107,13 +114,34 @@ pub(crate) async fn handle_message_string_tool(
         MessageDeliveryMode::TriggerTurn => AgentCommunicationKind::Followup,
     };
     let context = AgentCommunicationContext::new(kind, session.thread_id);
+    let blocking_retry = if blocks_local_work {
+        session
+            .services
+            .agent_control
+            .begin_blocking_agent_start(session.thread_id)
+            .map_err(FunctionCallError::RespondToModel)?
+    } else {
+        false
+    };
     let result = session
         .services
         .agent_control
         .send_inter_agent_communication(receiver_thread_id, mode.apply(communication), context)
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err));
-    result?;
+    if let Err(err) = result {
+        session
+            .services
+            .agent_control
+            .cancel_blocking_agent_start(session.thread_id, blocking_retry);
+        return Err(err);
+    }
+    if blocks_local_work {
+        session
+            .services
+            .agent_control
+            .register_blocking_agent(session.thread_id, receiver_thread_id);
+    }
     emit_sub_agent_activity(
         &session,
         &turn,

@@ -80,9 +80,13 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         .then(|| spawn_agent_models_description(&options.available_models));
     let inherited_model_guidance =
         (!options.hide_agent_type_model_reasoning).then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE);
-    let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
+    let agent_type_description = format!(
+        "This field is required in MultiAgentV2. {}",
+        options.agent_type_description
+    );
+    let mut properties = spawn_agent_common_properties_v2(&agent_type_description);
     if options.hide_agent_type_model_reasoning {
-        hide_spawn_agent_metadata_options(&mut properties);
+        hide_spawn_agent_model_metadata_options(&mut properties);
     }
     properties.insert(
         "task_name".to_string(),
@@ -103,7 +107,11 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            Some(vec!["task_name".to_string(), "message".to_string()]),
+            Some(vec![
+                "task_name".to_string(),
+                "message".to_string(),
+                "agent_type".to_string(),
+            ]),
             Some(false.into()),
         ),
         output_schema: Some(spawn_agent_output_schema_v2(
@@ -252,7 +260,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
 pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline."
+        description: "Wait for all target agents to finish their current work and for their final mailbox notifications to arrive. Unrelated mailbox traffic is ignored. The wait also ends early when new user input is steered into the active turn."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -492,10 +500,19 @@ fn wait_output_schema_v2() -> Value {
             },
             "timed_out": {
                 "type": "boolean",
-                "description": "Whether the wait call returned because no mailbox update arrived before the timeout."
+                "description": "Whether the deadline elapsed before every target completed."
+            },
+            "outcome": {
+                "type": "string",
+                "enum": ["completed", "failed", "steered", "timed_out"]
+            },
+            "statuses": {
+                "type": "object",
+                "description": "Latest statuses keyed by requested target.",
+                "additionalProperties": agent_status_output_schema()
             }
         },
-        "required": ["message", "timed_out"],
+        "required": ["message", "timed_out", "outcome", "statuses"],
         "additionalProperties": false
     })
 }
@@ -636,6 +653,10 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
 
 fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
     properties.remove("agent_type");
+    hide_spawn_agent_model_metadata_options(properties);
+}
+
+fn hide_spawn_agent_model_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
     properties.remove("model");
     properties.remove("reasoning_effort");
     properties.remove("service_tier");
@@ -723,7 +744,8 @@ fn spawn_agent_tool_description_v2(
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
 The spawned agent will have the same tools allowed at its configured depth. With the default `agents.max_depth = 1`, spawned subagents are leaves and cannot delegate further.
 {inherited_model_guidance}
-Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
+Set `agent_type` explicitly. Use `explorer` for bounded read-heavy investigation, `reviewer` for high-risk review, `worker` for independent implementation, or `default` for an unclassified child task.
+Only call this tool for a concrete, bounded subtask. Explorer and reviewer work blocks local task execution until their results arrive; worker and default agents remain nonblocking and should be used only when useful local work can proceed independently.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
 
@@ -832,15 +854,28 @@ fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema
 }
 
 fn wait_agent_tool_parameters_v2(options: WaitAgentTimeoutOptions) -> JsonSchema {
-    let properties = BTreeMap::from([(
-        "timeout_ms".to_string(),
-        JsonSchema::number(Some(format!(
-            "Timeout in milliseconds. Defaults to {}, min {}, max {}.",
-            options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
-        ))),
-    )]);
+    let properties = BTreeMap::from([
+        (
+            "targets".to_string(),
+            JsonSchema::array(
+                JsonSchema::string(Some("Agent id or canonical task name.".to_string())),
+                Some("Non-empty agents whose current work must all finish.".to_string()),
+            ),
+        ),
+        (
+            "timeout_ms".to_string(),
+            JsonSchema::number(Some(format!(
+                "Timeout in milliseconds. Defaults to {}, min {}, max {}.",
+                options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
+            ))),
+        ),
+    ]);
 
-    JsonSchema::object(properties, /*required*/ None, Some(false.into()))
+    JsonSchema::object(
+        properties,
+        Some(vec!["targets".to_string()]),
+        Some(false.into()),
+    )
 }
 
 #[cfg(test)]

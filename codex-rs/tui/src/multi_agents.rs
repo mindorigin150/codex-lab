@@ -262,6 +262,7 @@ pub(crate) fn tool_call_history_cell(
                 Some(waiting_begin(receiver_thread_ids, &mut agent_metadata))
             } else {
                 Some(waiting_end(
+                    status.clone(),
                     receiver_thread_ids,
                     agents_states,
                     &mut agent_metadata,
@@ -401,12 +402,26 @@ fn waiting_begin(
 }
 
 fn waiting_end(
+    status: CollabAgentToolCallStatus,
     receiver_thread_ids: &[String],
     agents_states: &std::collections::HashMap<String, CollabAgentState>,
     agent_metadata: &mut impl FnMut(ThreadId) -> AgentMetadata,
 ) -> PlainHistoryCell {
     let details = wait_complete_lines(receiver_thread_ids, agents_states, agent_metadata);
-    collab_event(title_text("Finished waiting"), details)
+    let title = if status == CollabAgentToolCallStatus::Failed
+        && agents_states.values().any(|state| {
+            matches!(
+                state.status,
+                CollabAgentStatus::PendingInit | CollabAgentStatus::Running
+            )
+        }) {
+        "Still waiting"
+    } else if status == CollabAgentToolCallStatus::Failed {
+        "Wait ended with errors"
+    } else {
+        "Finished waiting"
+    };
+    collab_event(title_text(title), details)
 }
 
 fn close_end(
@@ -582,7 +597,7 @@ fn wait_complete_lines(
     entries.extend(extras);
 
     if entries.is_empty() {
-        vec![Line::from(Span::from("No agents completed yet"))]
+        vec![Line::from(Span::from("No agent status was reported"))]
     } else {
         entries
             .into_iter()
@@ -766,6 +781,26 @@ mod tests {
         )
         .expect("wait end item renders");
 
+        let timed_out = tool_call_history_cell(
+            &ThreadItem::CollabAgentToolCall {
+                id: "call-wait-timeout".to_string(),
+                tool: CollabAgentTool::Wait,
+                status: CollabAgentToolCallStatus::Failed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![robie_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::from([(
+                    robie_id.to_string(),
+                    agent_state(CollabAgentStatus::Running, /*message*/ None),
+                )]),
+            },
+            /*cached_spawn_request*/ None,
+            |thread_id| metadata_for(thread_id, robie_id, bob_id),
+        )
+        .expect("timed-out wait item renders");
+
         let close = tool_call_history_cell(
             &ThreadItem::CollabAgentToolCall {
                 id: "call-close".to_string(),
@@ -786,7 +821,7 @@ mod tests {
         )
         .expect("close item renders");
 
-        let snapshot = [spawn, send, waiting, finished, close]
+        let snapshot = [spawn, send, waiting, finished, timed_out, close]
             .iter()
             .map(cell_to_text)
             .collect::<Vec<_>>()

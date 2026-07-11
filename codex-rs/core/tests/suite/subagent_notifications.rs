@@ -1063,6 +1063,7 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
         "task_name": "worker",
+        "agent_type": "default",
     }))?;
     mount_sse_once_match(
         &server,
@@ -1143,6 +1144,7 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
     let spawn_args = serde_json::to_string(&json!({
         "message": encrypted_message,
         "task_name": "worker",
+        "agent_type": "default",
     }))?;
     mount_sse_once_match(
         &server,
@@ -1285,6 +1287,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
     let spawn_args = serde_json::to_string(&json!({
         "message": "opaque-encrypted-message",
         "task_name": "worker",
+        "agent_type": "default",
     }))?;
     mount_sse_once_match(
         &server,
@@ -1354,7 +1357,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
                 "wait-agent-call",
                 MULTI_AGENT_V2_NAMESPACE,
                 "wait_agent",
-                "{}",
+                r#"{"targets":["worker"],"timeout_ms":10000}"#,
             ),
             ev_completed("resp-parent-3"),
         ]),
@@ -1424,6 +1427,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
         "task_name": "worker",
+        "agent_type": "default",
     }))?;
     let spawn_turn = mount_sse_once_match(
         &server,

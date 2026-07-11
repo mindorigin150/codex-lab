@@ -126,6 +126,9 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 
+mod blocking_agent_barrier;
+use self::blocking_agent_barrier::enforce_blocking_agent_barrier;
+
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
 ///
@@ -148,6 +151,14 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    let initial_user_input = input
+        .iter()
+        .any(|input| matches!(input, TurnInput::UserInput { .. }));
+    if initial_user_input {
+        sess.services
+            .agent_control
+            .acknowledge_barrier_failure(sess.thread_id);
+    }
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
@@ -223,7 +234,16 @@ pub(crate) async fn run_turn(
     // 2. After auto-compact, when model/tool continuation needs to resume before any steer.
 
     let mut next_step_context = Some(first_step_context);
+    let mut bypass_barrier_once = initial_user_input;
     loop {
+        if bypass_barrier_once {
+            bypass_barrier_once = false;
+        } else {
+            // New user input is the only condition that temporarily releases
+            // the barrier. The blocking agents keep running and the barrier is
+            // checked again before the following sample.
+            let _ = enforce_blocking_agent_barrier(&sess, &turn_context).await;
+        }
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.

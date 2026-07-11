@@ -3,7 +3,8 @@ use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
-use crate::agent::role::DEFAULT_ROLE_NAME;
+use crate::agent::role::EXPLORER_ROLE_NAME;
+use crate::agent::role::REVIEWER_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
@@ -50,12 +51,13 @@ async fn handle_spawn_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let role_name = args
-        .agent_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|role| !role.is_empty());
-    let fork_mode = args.fork_mode(role_name)?;
+    let role_name = args.agent_type.trim();
+    if role_name.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "agent_type must not be empty".to_string(),
+        ));
+    }
+    let fork_mode = args.fork_mode(Some(role_name))?;
 
     let message = message_content(args.message)?;
     let session_source = turn.session_source.clone();
@@ -71,11 +73,10 @@ async fn handle_spawn_agent(
         config.service_tier = Some(service_tier.clone());
     }
     if matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)) {
-        reject_full_fork_spawn_overrides(
-            role_name,
-            args.model.as_deref(),
-            args.reasoning_effort.clone(),
-        )?;
+        reject_full_fork_model_overrides(args.model.as_deref(), args.reasoning_effort.clone())?;
+        apply_role_to_config(&mut config, Some(role_name))
+            .await
+            .map_err(FunctionCallError::RespondToModel)?;
     } else {
         apply_requested_spawn_agent_model_overrides(
             &session,
@@ -85,7 +86,7 @@ async fn handle_spawn_agent(
             args.reasoning_effort.clone(),
         )
         .await?;
-        apply_role_to_config(&mut config, role_name)
+        apply_role_to_config(&mut config, Some(role_name))
             .await
             .map_err(FunctionCallError::RespondToModel)?;
     }
@@ -102,7 +103,7 @@ async fn handle_spawn_agent(
         session.thread_id,
         &turn.session_source,
         child_depth,
-        role_name,
+        Some(role_name),
         Some(args.task_name.clone()),
     )?;
     let new_agent_path = spawn_source.get_agent_path().ok_or_else(|| {
@@ -116,7 +117,17 @@ async fn handle_spawn_agent(
         .unwrap_or_else(AgentPath::root);
     let communication = communication_from_tool_message(author, new_agent_path.clone(), message);
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
-    let spawned_agent = Box::pin(
+    let blocking_role = matches!(role_name, EXPLORER_ROLE_NAME | REVIEWER_ROLE_NAME);
+    let blocking_retry = if blocking_role {
+        session
+            .services
+            .agent_control
+            .begin_blocking_agent_start(session.thread_id)
+            .map_err(FunctionCallError::RespondToModel)?
+    } else {
+        false
+    };
+    let spawn_result = Box::pin(
         session
             .services
             .agent_control
@@ -133,9 +144,24 @@ async fn handle_spawn_agent(
                 },
             ),
     )
-    .await
-    .map_err(collab_spawn_error)?;
+    .await;
+    let spawned_agent = match spawn_result {
+        Ok(spawned_agent) => spawned_agent,
+        Err(err) => {
+            session
+                .services
+                .agent_control
+                .cancel_blocking_agent_start(session.thread_id, blocking_retry);
+            return Err(collab_spawn_error(err));
+        }
+    };
     let new_thread_id = spawned_agent.thread_id;
+    if blocking_role {
+        session
+            .services
+            .agent_control
+            .register_blocking_agent(session.thread_id, new_thread_id);
+    }
     let agent_snapshot = session
         .services
         .agent_control
@@ -156,7 +182,7 @@ async fn handle_spawn_agent(
         },
     )
     .await;
-    let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
+    let role_tag = role_name;
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",
         /*inc*/ 1,
@@ -186,12 +212,25 @@ impl CoreToolRuntime for Handler {
 struct SpawnAgentArgs {
     message: String,
     task_name: String,
-    agent_type: Option<String>,
+    agent_type: String,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     service_tier: Option<String>,
     fork_turns: Option<String>,
     fork_context: Option<bool>,
+}
+
+fn reject_full_fork_model_overrides(
+    model: Option<&str>,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Result<(), FunctionCallError> {
+    if model.is_some() || reasoning_effort.is_some() {
+        return Err(FunctionCallError::RespondToModel(
+            "Full-history forked agents inherit the parent model and reasoning effort; omit model and reasoning_effort, or spawn without a full-history fork."
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl SpawnAgentArgs {

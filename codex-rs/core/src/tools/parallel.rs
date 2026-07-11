@@ -17,6 +17,9 @@ use tracing::trace_span;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::tools::blocking_spawn_gate::BlockingSpawnGate;
+use crate::tools::blocking_spawn_gate::is_blocking_spawn;
+use crate::tools::blocking_spawn_gate::is_collaboration_call;
 use crate::tools::context::AbortedToolOutput;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolPayload;
@@ -46,6 +49,7 @@ pub(crate) struct ToolCallRuntime {
     step_context: Arc<StepContext>,
     tracker: SharedTurnDiffTracker,
     parallel_execution: Arc<RwLock<()>>,
+    blocking_spawn_gate: Arc<BlockingSpawnGate>,
 }
 
 impl ToolCallRuntime {
@@ -61,6 +65,7 @@ impl ToolCallRuntime {
             step_context,
             tracker,
             parallel_execution: Arc::new(RwLock::new(())),
+            blocking_spawn_gate: Arc::new(BlockingSpawnGate::default()),
         }
     }
 
@@ -97,6 +102,17 @@ impl ToolCallRuntime {
         source: ToolCallSource,
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<AnyToolResult, FunctionCallError>> {
+        let collaboration_namespace = self
+            .step_context
+            .turn
+            .config
+            .multi_agent_v2
+            .tool_namespace
+            .as_deref();
+        let is_collaboration_call = is_collaboration_call(&call, collaboration_namespace);
+        let mut blocking_spawn_registration = is_blocking_spawn(&call, collaboration_namespace)
+            .then(|| self.blocking_spawn_gate.register());
+        let blocking_spawn_gate = Arc::clone(&self.blocking_spawn_gate);
         let supports_parallel = self.router.tool_supports_parallel(&call);
         let router = Arc::clone(&self.router);
         let session = Arc::clone(&self.session);
@@ -130,6 +146,21 @@ impl ToolCallRuntime {
 
         let mut dispatch_handle: AbortOnDropHandle<Result<AnyToolResult, FunctionCallError>> =
             AbortOnDropHandle::new(tokio::spawn(async move {
+                if !is_collaboration_call {
+                    let blocking_spawn_succeeded =
+                        blocking_spawn_gate.successful_spawn_settled().await;
+                    if blocking_spawn_succeeded
+                        || session
+                            .services
+                            .agent_control
+                            .barrier_failure_pending(session.thread_id)
+                    {
+                        return Err(FunctionCallError::RespondToModel(
+                            "Explorer or reviewer work is blocking local tools. Wait for the blocking agents, retry a failed blocking task once with a fresh agent, or ask the user how to proceed."
+                                .to_string(),
+                        ));
+                    }
+                }
                 let _guard = if supports_parallel {
                     Either::Left(lock.read().await)
                 } else {
@@ -141,7 +172,7 @@ impl ToolCallRuntime {
                     let _ = execution_started_at.set(Instant::now());
                 }
 
-                router
+                let result = router
                     .dispatch_tool_call_with_terminal_outcome(
                         session,
                         step_context,
@@ -152,7 +183,11 @@ impl ToolCallRuntime {
                         dispatch_terminal_outcome_reached,
                     )
                     .instrument(dispatch_span.clone())
-                    .await
+                    .await;
+                if let Some(registration) = blocking_spawn_registration.as_mut() {
+                    registration.finish(result.is_ok());
+                }
+                result
             }));
 
         async move {

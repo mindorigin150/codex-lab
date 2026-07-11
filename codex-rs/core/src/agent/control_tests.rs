@@ -3472,3 +3472,59 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
         .await
         .expect("tree shutdown after partial subtree resume should succeed");
 }
+#[test]
+fn completion_receipts_track_queued_generations_in_order() {
+    let control = AgentControl::default();
+    let agent_id = ThreadId::new();
+
+    let first = control.reserve_agent_generation(agent_id);
+    let second = control.reserve_agent_generation(agent_id);
+    control.record_completion_delivery(agent_id, AgentStatus::Completed(Some("first".into())));
+    assert_eq!(control.current_completion_receipt(agent_id), None);
+
+    control.record_completion_delivery(agent_id, AgentStatus::Completed(Some("second".into())));
+    assert_eq!(
+        control.current_completion_receipt(agent_id),
+        Some(AgentStatus::Completed(Some("second".into())))
+    );
+    assert!(second > first);
+}
+
+#[test]
+fn cancelling_latest_generation_restores_previous_receipt() {
+    let control = AgentControl::default();
+    let agent_id = ThreadId::new();
+
+    let _first = control.reserve_agent_generation(agent_id);
+    control.record_completion_delivery(agent_id, AgentStatus::Completed(Some("first".into())));
+    let second = control.reserve_agent_generation(agent_id);
+    assert_eq!(control.current_completion_receipt(agent_id), None);
+
+    control.cancel_agent_generation(agent_id, second);
+    assert_eq!(
+        control.current_completion_receipt(agent_id),
+        Some(AgentStatus::Completed(Some("first".into())))
+    );
+}
+
+#[test]
+fn blocking_barrier_failure_requires_user_acknowledgement_or_retry() {
+    let control = AgentControl::default();
+    let parent_id = ThreadId::new();
+    let first_agent = ThreadId::new();
+    let retry_agent = ThreadId::new();
+
+    control.register_blocking_agent(parent_id, first_agent);
+    control.settle_blocking_agents(parent_id, &[first_agent], /*failed*/ true);
+    assert!(control.barrier_failure_pending(parent_id));
+
+    assert_eq!(control.begin_blocking_agent_start(parent_id), Ok(true));
+    control.register_blocking_agent(parent_id, retry_agent);
+    assert!(!control.barrier_failure_pending(parent_id));
+    control.settle_blocking_agents(parent_id, &[retry_agent], /*failed*/ true);
+    assert!(control.barrier_failure_pending(parent_id));
+    assert!(control.begin_blocking_agent_start(parent_id).is_err());
+
+    control.acknowledge_barrier_failure(parent_id);
+    assert!(!control.barrier_failure_pending(parent_id));
+}

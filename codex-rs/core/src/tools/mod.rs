@@ -1,4 +1,5 @@
 mod approvals;
+mod blocking_spawn_gate;
 pub(crate) mod code_mode;
 pub(crate) mod context;
 pub(crate) mod events;

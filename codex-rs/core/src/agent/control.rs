@@ -40,18 +40,20 @@ use codex_protocol::user_input::UserInput;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
 use tokio::sync::watch;
 use tracing::warn;
 
+use self::barrier::BlockingBarriers;
+use self::barrier::CompletionReceipts;
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
 
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 
+mod barrier;
 mod execution;
 mod legacy;
 mod residency;
@@ -105,6 +107,8 @@ pub(crate) struct AgentControl {
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
+    completion_receipts: Arc<CompletionReceipts>,
+    blocking_barriers: Arc<BlockingBarriers>,
 }
 
 impl AgentControl {
@@ -157,6 +161,7 @@ impl AgentControl {
         input: Vec<UserInput>,
     ) -> CodexResult<String> {
         let last_task_message = non_empty_task_message(render_input_preview(&input));
+        let generation = self.reserve_agent_generation(agent_id);
         let result = self
             .handle_thread_request_result(
                 agent_id,
@@ -171,6 +176,8 @@ impl AgentControl {
                     .update_last_task_message(agent_id, last_task_message),
                 None => self.state.clear_last_task_message(agent_id),
             }
+        } else {
+            self.cancel_agent_generation(agent_id, generation);
         }
         result
     }
@@ -200,8 +207,17 @@ impl AgentControl {
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
     ) -> CodexResult<String> {
-        self.submit_inter_agent_communication(agent_id, state, communication, context)
-            .await
+        let starts_generation = communication.trigger_turn;
+        let generation = starts_generation.then(|| self.reserve_agent_generation(agent_id));
+        let result = self
+            .submit_inter_agent_communication(agent_id, state, communication, context)
+            .await;
+        if result.is_err()
+            && let Some(generation) = generation
+        {
+            self.cancel_agent_generation(agent_id, generation);
+        }
+        result
     }
 
     async fn submit_inter_agent_communication(

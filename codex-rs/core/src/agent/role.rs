@@ -164,6 +164,9 @@ mod reload {
             config_layer_stack,
         )
         .await?;
+        if preserve_current_provider {
+            next_config.model_provider = config.model_provider.clone();
+        }
         if preserve_current_reasoning_effort {
             next_config.model_reasoning_effort = config.model_reasoning_effort.clone();
         }

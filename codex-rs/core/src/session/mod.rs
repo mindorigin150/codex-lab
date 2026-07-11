@@ -1907,6 +1907,9 @@ impl Session {
             debug!("failed to notify parent thread {parent_thread_id}: {err}");
             return;
         }
+        self.services
+            .agent_control
+            .record_completion_delivery(self.thread_id, status.clone());
         if let Some(message) = trace_message {
             self.services
                 .rollout_thread_trace

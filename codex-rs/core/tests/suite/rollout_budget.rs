@@ -125,6 +125,7 @@ async fn subagent_usage_draws_from_the_shared_budget() -> Result<()> {
     let spawn_args = json!({
         "message": CHILD_PROMPT,
         "task_name": "budget_worker",
+        "agent_type": "default",
     })
     .to_string();
     mount_sse_once_match(

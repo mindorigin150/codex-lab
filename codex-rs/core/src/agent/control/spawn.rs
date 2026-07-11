@@ -1,6 +1,7 @@
 use super::residency::is_v2_resident_session_source;
 use super::*;
 use codex_extension_api::ExtensionDataInit;
+use std::collections::VecDeque;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 

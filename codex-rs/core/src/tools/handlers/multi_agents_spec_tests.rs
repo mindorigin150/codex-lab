@@ -90,7 +90,9 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(!properties.contains_key("fork_context"));
     assert_eq!(
         properties.get("agent_type"),
-        Some(&JsonSchema::string(Some("role help".to_string())))
+        Some(&JsonSchema::string(Some(
+            "This field is required in MultiAgentV2. role help".to_string()
+        )))
     );
     assert_eq!(
         properties
@@ -106,7 +108,11 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         parameters.required.as_ref(),
-        Some(&vec!["task_name".to_string(), "message".to_string()])
+        Some(&vec![
+            "task_name".to_string(),
+            "message".to_string(),
+            "agent_type".to_string(),
+        ])
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema")["required"],
@@ -235,7 +241,12 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
         .as_ref()
         .expect("spawn_agent should use object params");
 
-    assert!(!properties.contains_key("agent_type"));
+    assert_eq!(
+        properties.get("agent_type"),
+        Some(&JsonSchema::string(Some(
+            "This field is required in MultiAgentV2. role help".to_string()
+        )))
+    );
     assert!(!properties.contains_key("model"));
     assert!(!properties.contains_key("reasoning_effort"));
     assert!(!properties.contains_key("service_tier"));
@@ -326,7 +337,7 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
 }
 
 #[test]
-fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
+fn wait_agent_tool_v2_requires_targets_and_describes_barrier_outcome() {
     let ToolSpec::Function(ResponsesApiTool {
         description,
         parameters,
@@ -348,22 +359,29 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
         .properties
         .as_ref()
         .expect("wait_agent should use object params");
-    assert!(!properties.contains_key("targets"));
+    assert!(properties.contains_key("targets"));
     assert!(properties.contains_key("timeout_ms"));
-    assert!(description.contains(
-        "Does not return the content; returns either a summary of which agents have updates (if any)"
-    ));
+    assert!(description.contains("Wait for all target agents"));
     assert_eq!(
         properties
             .get("timeout_ms")
             .and_then(|schema| schema.description.as_deref()),
         Some("Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.")
     );
-    assert_eq!(parameters.required.as_ref(), None);
     assert_eq!(
-        output_schema.expect("wait output schema")["properties"]["message"]["description"],
+        parameters.required.as_ref(),
+        Some(&vec!["targets".to_string()])
+    );
+    let output_schema = output_schema.expect("wait output schema");
+    assert_eq!(
+        output_schema["properties"]["message"]["description"],
         json!("Brief wait summary without the agent's final content.")
     );
+    assert_eq!(
+        output_schema["required"],
+        json!(["message", "timed_out", "outcome", "statuses"])
+    );
+    assert!(output_schema["properties"].get("statuses").is_some());
 }
 
 #[test]

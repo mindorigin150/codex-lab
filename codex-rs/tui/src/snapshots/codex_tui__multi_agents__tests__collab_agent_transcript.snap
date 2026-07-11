@@ -1,5 +1,6 @@
 ---
 source: tui/src/multi_agents.rs
+assertion_line: 829
 expression: snapshot
 ---
 • Spawned Robie [explorer] (gpt-5 high)
@@ -13,5 +14,8 @@ expression: snapshot
 • Finished waiting
   └ Robie [explorer]: Completed - 39916800
     Bob [worker]: Error - tool timeout
+
+• Still waiting
+  └ Robie [explorer]: Running
 
 • Closed Robie [explorer]
