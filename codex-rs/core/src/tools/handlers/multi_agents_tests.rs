@@ -1,5 +1,6 @@
 use super::*;
 use crate::ThreadManager;
+use crate::agent::role::apply_role_to_config;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
@@ -4642,6 +4643,50 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
         .set_permission_profile(permission_profile)
         .expect("permission profile set");
     assert_eq!(config, expected);
+}
+
+#[tokio::test]
+async fn spawn_runtime_permissions_apply_role_and_parent_intersection() {
+    let (_session, mut turn) = make_session_and_context().await;
+    let mut parent_config = (*turn.config).clone();
+    parent_config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("unrestricted parent profile should be accepted");
+    turn.config = Arc::new(parent_config);
+    turn.permission_profile = PermissionProfile::Disabled;
+    let mut explorer_config = build_agent_spawn_config(
+        &BaseInstructions {
+            text: "base".to_string(),
+        },
+        &turn,
+    )
+    .expect("spawn config");
+
+    apply_role_to_config(&mut explorer_config, Some("explorer"))
+        .await
+        .expect("explorer role should apply");
+    apply_spawn_agent_runtime_overrides(&mut explorer_config, &turn)
+        .expect("parent runtime permissions should apply");
+
+    assert_eq!(
+        explorer_config.permissions.effective_permission_profile(),
+        PermissionProfile::read_only()
+    );
+
+    let mut restricted_turn = turn;
+    restricted_turn.permission_profile = PermissionProfile::read_only();
+    explorer_config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("test role should request unrestricted permissions");
+    apply_spawn_agent_runtime_overrides(&mut explorer_config, &restricted_turn)
+        .expect("parent runtime permissions should prevent role expansion");
+
+    assert_eq!(
+        explorer_config.permissions.effective_permission_profile(),
+        PermissionProfile::read_only()
+    );
 }
 
 #[tokio::test]

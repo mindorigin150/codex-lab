@@ -1,11 +1,14 @@
 use super::effective_file_system_sandbox_policy;
 use super::intersect_permission_profiles;
+use super::intersect_runtime_permission_profiles;
 use super::merge_file_system_policy_with_additional_permissions;
 use super::normalize_additional_permissions;
 use super::should_require_platform_sandbox;
 use codex_protocol::models::AdditionalPermissionProfile as PermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::NetworkPermissions;
+use codex_protocol::models::PermissionProfile as RuntimePermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
@@ -18,6 +21,104 @@ use pretty_assertions::assert_eq;
 #[cfg(unix)]
 use std::path::Path;
 use tempfile::TempDir;
+
+fn managed_runtime_profile(
+    entries: Vec<FileSystemSandboxEntry>,
+    network: NetworkSandboxPolicy,
+) -> RuntimePermissionProfile {
+    RuntimePermissionProfile::Managed {
+        file_system: ManagedFileSystemPermissions::Restricted {
+            entries,
+            glob_scan_max_depth: None,
+        },
+        network,
+    }
+}
+
+#[test]
+fn runtime_profile_intersection_keeps_read_only_under_unrestricted_parent() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    assert_eq!(
+        intersect_runtime_permission_profiles(
+            RuntimePermissionProfile::read_only(),
+            RuntimePermissionProfile::Disabled,
+            temp_dir.path(),
+        ),
+        RuntimePermissionProfile::read_only()
+    );
+}
+
+#[test]
+fn runtime_profile_intersection_limits_restricted_allowlist_and_preserves_deny() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let allowed = AbsolutePathBuf::from_absolute_path(temp_dir.path().join("allowed"))
+        .expect("allowed path should be absolute");
+    let denied = allowed.join("secret");
+    let parent = managed_runtime_profile(
+        vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: allowed.clone(),
+                },
+                access: FileSystemAccessMode::Write,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: denied.clone(),
+                },
+                access: FileSystemAccessMode::Deny,
+            },
+        ],
+        NetworkSandboxPolicy::Enabled,
+    );
+
+    let intersected = intersect_runtime_permission_profiles(
+        RuntimePermissionProfile::read_only(),
+        parent,
+        temp_dir.path(),
+    );
+    let policy = intersected.file_system_sandbox_policy();
+
+    assert_eq!(
+        policy.resolve_access_with_cwd(allowed.as_path(), temp_dir.path()),
+        FileSystemAccessMode::Read
+    );
+    assert_eq!(
+        policy.resolve_access_with_cwd(denied.as_path(), temp_dir.path()),
+        FileSystemAccessMode::Deny
+    );
+    assert_eq!(
+        intersected.network_sandbox_policy(),
+        NetworkSandboxPolicy::Restricted
+    );
+}
+
+#[test]
+fn runtime_profile_intersection_downgrades_workspace_write_to_read_only() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let workspace = AbsolutePathBuf::from_absolute_path(temp_dir.path())
+        .expect("workspace path should be absolute");
+    let parent = RuntimePermissionProfile::workspace_write_with(
+        std::slice::from_ref(&workspace),
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+
+    let intersected = intersect_runtime_permission_profiles(
+        RuntimePermissionProfile::read_only(),
+        parent,
+        temp_dir.path(),
+    );
+    let policy = intersected.file_system_sandbox_policy();
+
+    assert_eq!(
+        policy.resolve_access_with_cwd(temp_dir.path(), temp_dir.path()),
+        FileSystemAccessMode::Read
+    );
+    assert_eq!(policy.has_full_disk_write_access(), false);
+}
 
 #[cfg(unix)]
 fn symlink_dir(original: &Path, link: &Path) -> std::io::Result<()> {

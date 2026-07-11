@@ -1,5 +1,6 @@
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -191,6 +192,206 @@ pub fn intersect_permission_profiles(
     AdditionalPermissionProfile {
         network,
         file_system,
+    }
+}
+
+/// Intersects two complete runtime profiles for nested execution.
+///
+/// `requested` is the policy selected by the nested role and `granted` is the
+/// parent runtime policy. The result never grants access that either input
+/// denies. This differs from [`intersect_permission_profiles`], which operates
+/// on incremental permission requests rather than complete sandbox profiles.
+pub fn intersect_runtime_permission_profiles(
+    requested: PermissionProfile,
+    granted: PermissionProfile,
+    cwd: &Path,
+) -> PermissionProfile {
+    let network = intersect_network_sandbox_policies(
+        requested.network_sandbox_policy(),
+        granted.network_sandbox_policy(),
+    );
+    match (requested, granted) {
+        (PermissionProfile::Disabled, granted) => granted,
+        (requested, PermissionProfile::Disabled) => requested,
+        (
+            PermissionProfile::External { .. },
+            PermissionProfile::External { .. },
+        ) => PermissionProfile::External { network },
+        (
+            PermissionProfile::Managed { file_system, .. },
+            PermissionProfile::External { .. },
+        )
+        | (
+            PermissionProfile::External { .. },
+            PermissionProfile::Managed { file_system, .. },
+        ) => PermissionProfile::Managed {
+            file_system,
+            network,
+        },
+        (
+            PermissionProfile::Managed {
+                file_system: requested_file_system,
+                ..
+            },
+            PermissionProfile::Managed {
+                file_system: granted_file_system,
+                ..
+            },
+        ) => PermissionProfile::Managed {
+            file_system: intersect_managed_file_system_permissions(
+                requested_file_system,
+                granted_file_system,
+                cwd,
+            ),
+            network,
+        },
+    }
+}
+
+fn intersect_network_sandbox_policies(
+    requested: NetworkSandboxPolicy,
+    granted: NetworkSandboxPolicy,
+) -> NetworkSandboxPolicy {
+    if requested.is_enabled() && granted.is_enabled() {
+        NetworkSandboxPolicy::Enabled
+    } else {
+        NetworkSandboxPolicy::Restricted
+    }
+}
+
+fn intersect_managed_file_system_permissions(
+    requested: ManagedFileSystemPermissions,
+    granted: ManagedFileSystemPermissions,
+    cwd: &Path,
+) -> ManagedFileSystemPermissions {
+    match (requested, granted) {
+        (ManagedFileSystemPermissions::Unrestricted, granted) => granted,
+        (requested, ManagedFileSystemPermissions::Unrestricted) => requested,
+        (
+            ManagedFileSystemPermissions::Restricted {
+                entries: requested_entries,
+                glob_scan_max_depth: requested_glob_scan_max_depth,
+            },
+            ManagedFileSystemPermissions::Restricted {
+                entries: granted_entries,
+                glob_scan_max_depth: granted_glob_scan_max_depth,
+            },
+        ) => {
+            let requested_policy = FileSystemSandboxPolicy::restricted(requested_entries)
+                .materialize_project_roots_with_cwd(cwd);
+            let granted_policy = FileSystemSandboxPolicy::restricted(granted_entries)
+                .materialize_project_roots_with_cwd(cwd);
+            let requested_entries = requested_policy.entries.clone();
+            let granted_entries = granted_policy.entries.clone();
+            let mut entries = requested_entries
+                .iter()
+                .chain(&granted_entries)
+                .filter(|entry| entry.access == FileSystemAccessMode::Deny)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            append_intersected_grants(
+                &requested_entries,
+                &granted_policy,
+                cwd,
+                &mut entries,
+            );
+            append_intersected_grants(
+                &granted_entries,
+                &requested_policy,
+                cwd,
+                &mut entries,
+            );
+
+            ManagedFileSystemPermissions::Restricted {
+                entries,
+                glob_scan_max_depth: requested_glob_scan_max_depth
+                    .map(usize::from)
+                    .max(granted_glob_scan_max_depth.map(usize::from))
+                    .and_then(NonZeroUsize::new),
+            }
+        }
+    }
+}
+
+fn append_intersected_grants(
+    candidates: &[FileSystemSandboxEntry],
+    other_policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    entries: &mut Vec<FileSystemSandboxEntry>,
+) {
+    for candidate in candidates
+        .iter()
+        .filter(|entry| entry.access != FileSystemAccessMode::Deny)
+    {
+        let other_access = access_for_permission_entry(other_policy, candidate, cwd);
+        let access = intersect_file_system_access(candidate.access, other_access);
+        if access == FileSystemAccessMode::Deny {
+            continue;
+        }
+        let entry = FileSystemSandboxEntry {
+            path: candidate.path.clone(),
+            access,
+        };
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+}
+
+fn access_for_permission_entry(
+    policy: &FileSystemSandboxPolicy,
+    entry: &FileSystemSandboxEntry,
+    cwd: &Path,
+) -> FileSystemAccessMode {
+    if !matches!(policy.kind, codex_protocol::permissions::FileSystemSandboxKind::Restricted) {
+        return FileSystemAccessMode::Write;
+    }
+    if let Some(path) = permission_entry_probe_path(entry, cwd) {
+        return policy.resolve_access_with_cwd(path.as_path(), cwd);
+    }
+
+    policy
+        .entries
+        .iter()
+        .filter(|other| other.path == entry.path)
+        .map(|other| other.access)
+        .max()
+        .unwrap_or(FileSystemAccessMode::Deny)
+}
+
+fn permission_entry_probe_path(
+    entry: &FileSystemSandboxEntry,
+    cwd: &Path,
+) -> Option<AbsolutePathBuf> {
+    match &entry.path {
+        FileSystemPath::Path { path } => Some(path.clone()),
+        FileSystemPath::GlobPattern { .. } => None,
+        FileSystemPath::Special { value } => match value {
+            FileSystemSpecialPath::Root => AbsolutePathBuf::from_absolute_path(
+                cwd.ancestors().last()?,
+            )
+            .ok(),
+            FileSystemSpecialPath::ProjectRoots { .. } => None,
+            FileSystemSpecialPath::Tmpdir => std::env::var_os("TMPDIR")
+                .filter(|value| !value.is_empty())
+                .and_then(|value| AbsolutePathBuf::from_absolute_path(PathBuf::from(value)).ok()),
+            FileSystemSpecialPath::SlashTmp => AbsolutePathBuf::from_absolute_path("/tmp").ok(),
+            FileSystemSpecialPath::Minimal | FileSystemSpecialPath::Unknown { .. } => None,
+        },
+    }
+}
+
+fn intersect_file_system_access(
+    requested: FileSystemAccessMode,
+    granted: FileSystemAccessMode,
+) -> FileSystemAccessMode {
+    match (requested, granted) {
+        (FileSystemAccessMode::Write, FileSystemAccessMode::Write) => FileSystemAccessMode::Write,
+        (requested, granted) if requested.can_read() && granted.can_read() => {
+            FileSystemAccessMode::Read
+        }
+        _ => FileSystemAccessMode::Deny,
     }
 }
 

@@ -18,6 +18,7 @@ use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
+use codex_sandboxing::policy_transforms::intersect_runtime_permission_profiles;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
@@ -222,9 +223,18 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     #[allow(deprecated)]
     let turn_cwd = turn.cwd.clone();
     config.cwd = turn_cwd;
+    let role_permission_profile = config.permissions.effective_permission_profile();
+    let parent_permission_profile = turn.permission_profile();
+    #[allow(deprecated)]
+    let permission_cwd = turn.cwd.as_path();
+    let permission_profile = intersect_runtime_permission_profiles(
+        role_permission_profile,
+        parent_permission_profile,
+        permission_cwd,
+    );
     config
         .permissions
-        .set_permission_profile(turn.permission_profile())
+        .set_permission_profile(permission_profile)
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("permission_profile is invalid: {err}"))
         })?;
