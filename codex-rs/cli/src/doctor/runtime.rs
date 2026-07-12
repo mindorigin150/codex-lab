@@ -167,7 +167,7 @@ pub(super) async fn linux_sandbox_check(config: &codex_core::config::Config) -> 
             )
             .detail(format!("sandbox helper: {helper}"))
             .detail(format!("sandbox probe: {error}"))
-            .remediation("Install bubblewrap (`sudo apt-get update && sudo apt-get install -y bubblewrap` on Debian/Ubuntu), restart Codex Lab, and rerun `codex-lab doctor`."),
+            .remediation("Reinstall Codex Lab to restore its bundled bubblewrap, or rerun the installer with `--bwrap PATH` pointing to a trusted user-owned binary. If bubblewrap is present but namespace creation is denied, enable unprivileged user namespaces according to your system policy, then rerun `codex-lab doctor`."),
         }
     }
 }

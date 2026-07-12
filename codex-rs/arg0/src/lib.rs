@@ -34,6 +34,11 @@ pub struct Arg0DispatchPaths {
     pub main_execve_wrapper_exe: Option<PathBuf>,
 }
 
+/// Returns the SHA-256 digest embedded for the bundled Linux bubblewrap.
+pub fn bundled_bwrap_expected_sha256() -> Option<String> {
+    codex_linux_sandbox::bundled_bwrap_expected_sha256()
+}
+
 /// Keeps the per-session PATH entry alive and locked for the process lifetime.
 pub struct Arg0PathEntryGuard {
     _temp_dir: TempDir,

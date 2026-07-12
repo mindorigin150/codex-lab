@@ -242,6 +242,10 @@ enum DebugSubcommand {
     /// Internal: reset local memory state for a fresh start.
     #[clap(hide = true)]
     ClearMemories,
+
+    /// Internal: print the SHA-256 expected for the bundled Linux bubblewrap.
+    #[clap(hide = true, name = "bwrap-digest")]
+    BwrapDigest,
 }
 
 #[derive(Debug, Parser)]
@@ -1534,6 +1538,10 @@ async fn cli_main(
                 )?;
                 run_debug_clear_memories_command(&root_config_overrides).await?;
             }
+            DebugSubcommand::BwrapDigest => match codex_arg0::bundled_bwrap_expected_sha256() {
+                Some(digest) => println!("{digest}"),
+                None => println!("none"),
+            },
         },
         Some(Subcommand::Execpolicy(ExecpolicyCommand { sub })) => match sub {
             ExecpolicySubcommand::Check(cmd) => {

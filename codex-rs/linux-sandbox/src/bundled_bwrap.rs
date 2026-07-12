@@ -1,5 +1,6 @@
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -67,6 +68,13 @@ impl BundledBwrapLauncher {
             self.program.as_path().display()
         );
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(path: &Path) -> Self {
+        Self {
+            program: AbsolutePathBuf::from_absolute_path(path).expect("absolute test path"),
+        }
+    }
 }
 
 fn find_for_install_context(context: &InstallContext) -> Option<AbsolutePathBuf> {
@@ -121,6 +129,15 @@ fn expected_sha256() -> Option<[u8; 32]> {
             .unwrap_or_else(|err| panic!("invalid CODEX_BWRAP_SHA256 value: {err}"));
         (digest != NULL_SHA256_DIGEST).then_some(digest)
     })
+}
+
+pub(crate) fn expected_sha256_hex() -> Option<String> {
+    let digest = expected_sha256()?;
+    let mut hex = String::with_capacity(SHA256_HEX_LEN);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Some(hex)
 }
 
 fn verify_digest(file: &File, expected: Option<[u8; 32]>, path: &Path) -> Result<(), String> {

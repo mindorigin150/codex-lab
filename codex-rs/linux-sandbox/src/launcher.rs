@@ -1,3 +1,4 @@
+use std::env;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::fs::File;
@@ -52,18 +53,37 @@ fn preferred_bwrap_launcher() -> BubblewrapLauncher {
     static LAUNCHER: OnceLock<BubblewrapLauncher> = OnceLock::new();
     LAUNCHER
         .get_or_init(|| {
-            if let Some(path) = find_system_bwrap_in_path()
-                && let Some(launcher) = system_bwrap_launcher_for_path(&path)
-            {
-                return BubblewrapLauncher::System(launcher);
-            }
-
-            match bundled_bwrap::launcher() {
-                Some(launcher) => BubblewrapLauncher::Bundled(launcher),
-                None => BubblewrapLauncher::Unavailable,
-            }
+            let bundled = bundled_bwrap::launcher();
+            select_bwrap_launcher(prefer_bundled_bwrap(), bundled, || {
+                find_system_bwrap_in_path().and_then(|path| system_bwrap_launcher_for_path(&path))
+            })
         })
         .clone()
+}
+
+fn select_bwrap_launcher(
+    prefer_bundled: bool,
+    bundled: Option<BundledBwrapLauncher>,
+    system: impl FnOnce() -> Option<SystemBwrapLauncher>,
+) -> BubblewrapLauncher {
+    if prefer_bundled && let Some(launcher) = bundled.clone() {
+        return BubblewrapLauncher::Bundled(launcher);
+    }
+    if let Some(launcher) = system() {
+        return BubblewrapLauncher::System(launcher);
+    }
+    match bundled {
+        Some(launcher) => BubblewrapLauncher::Bundled(launcher),
+        None => BubblewrapLauncher::Unavailable,
+    }
+}
+
+fn prefer_bundled_bwrap() -> bool {
+    prefer_bundled_bwrap_value(env::var("CODEX_PREFER_BUNDLED_BWRAP").ok().as_deref())
+}
+
+fn prefer_bundled_bwrap_value(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn system_bwrap_launcher_for_path(system_bwrap_path: &Path) -> Option<SystemBwrapLauncher> {
@@ -216,6 +236,27 @@ mod tests {
         assert_eq!(
             system_bwrap_launcher_for_path(Path::new("/definitely/not/a/bwrap")),
             None
+        );
+    }
+
+    #[test]
+    fn bundled_preference_requires_explicit_truthy_value() {
+        assert!(prefer_bundled_bwrap_value(Some("1")));
+        assert!(prefer_bundled_bwrap_value(Some("true")));
+        assert!(!prefer_bundled_bwrap_value(None));
+        assert!(!prefer_bundled_bwrap_value(Some("0")));
+    }
+
+    #[test]
+    fn explicit_preference_selects_bundled_without_probing_system() {
+        let fake_bwrap = NamedTempFile::new().expect("temp file");
+        let bundled = BundledBwrapLauncher::for_test(fake_bwrap.path());
+
+        assert_eq!(
+            select_bwrap_launcher(true, Some(bundled.clone()), || {
+                panic!("system bwrap must not be probed")
+            }),
+            BubblewrapLauncher::Bundled(bundled)
         );
     }
 }

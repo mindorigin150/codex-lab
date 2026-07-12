@@ -25,7 +25,17 @@ pub fn run_main() -> ! {
     linux_run_main::run_main();
 }
 
+#[cfg(target_os = "linux")]
+pub fn bundled_bwrap_expected_sha256() -> Option<String> {
+    bundled_bwrap::expected_sha256_hex()
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn run_main() -> ! {
     panic!("codex-linux-sandbox is only supported on Linux");
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn bundled_bwrap_expected_sha256() -> Option<String> {
+    None
 }

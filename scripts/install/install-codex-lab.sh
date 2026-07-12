@@ -11,6 +11,7 @@ SHARED_STATE_HOME="${CODEX_SHARED_STATE_HOME:-$HOME/.codex}"
 INSTALL_ROOT="${CODEX_LAB_INSTALL_ROOT:-$HOME/.local/lib/codex-lab}"
 BIN_DIR="${CODEX_LAB_BIN_DIR:-$HOME/.local/bin}"
 SOURCE_BINARY="${CODEX_LAB_BINARY:-}"
+SOURCE_BWRAP="${CODEX_LAB_BWRAP:-}"
 RELEASE_ID="${CODEX_LAB_RELEASE_ID:-}"
 RUN_DOCTOR="${CODEX_LAB_RUN_DOCTOR:-true}"
 STRIP_BINARY="${CODEX_LAB_STRIP_BINARY:-true}"
@@ -34,7 +35,8 @@ rollouts and SQLite-backed state are shared with the official Codex home under
 ~/.codex, so `codex resume` and `codex-lab resume` see the same history.
 
 Options:
-  --binary PATH       Install an already-built codex binary instead of building.
+  --binary PATH       Install a matching Codex Lab binary instead of building.
+  --bwrap PATH        Bundle this bubblewrap binary on Linux.
   --release-id ID     Versioned install directory name (default: git commit).
   --skip-doctor       Do not run the installed binary's doctor command.
   --no-strip          Do not strip debug symbols from the installed copy.
@@ -46,6 +48,7 @@ Environment:
   CODEX_LAB_INSTALL_ROOT  Versioned install root.
   CODEX_LAB_BIN_DIR       Directory for the codex-lab launcher.
   CODEX_LAB_BINARY        Same as --binary.
+  CODEX_LAB_BWRAP         Same as --bwrap.
   CODEX_LAB_RELEASE_ID    Same as --release-id.
   CODEX_LAB_RUN_DOCTOR    true/false; default true.
   CODEX_LAB_STRIP_BINARY  true/false; default true.
@@ -68,6 +71,14 @@ parse_args() {
           exit 1
         }
         SOURCE_BINARY="$2"
+        shift
+        ;;
+      --bwrap)
+        [ "$#" -ge 2 ] || {
+          echo "--bwrap requires a path." >&2
+          exit 1
+        }
+        SOURCE_BWRAP="$2"
         shift
         ;;
       --release-id)
@@ -128,6 +139,73 @@ sha256_file() {
     shasum -a 256 "$path" | awk '{print $1}'
   else
     printf 'unavailable\n'
+  fi
+}
+
+bwrap_is_compatible() {
+  candidate="$1"
+  [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
+  "$candidate" --help 2>&1 | grep -q -- '--perms'
+}
+
+resolve_bwrap_source() {
+  if [ "$(uname -s 2>/dev/null || true)" != Linux ]; then
+    if [ -n "$SOURCE_BWRAP" ]; then
+      echo "--bwrap is only supported on Linux." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  if [ -n "$SOURCE_BWRAP" ]; then
+    if ! bwrap_is_compatible "$SOURCE_BWRAP"; then
+      echo "Configured bwrap is not executable or does not support --perms: $SOURCE_BWRAP" >&2
+      exit 1
+    fi
+    BWRAP_SOURCE_KIND=explicit
+    return
+  fi
+
+  official_bwrap="$SHARED_STATE_HOME/packages/standalone/current/codex-resources/bwrap"
+  if bwrap_is_compatible "$official_bwrap"; then
+    SOURCE_BWRAP="$official_bwrap"
+    BWRAP_SOURCE_KIND=official-codex
+    return
+  fi
+
+  path_bwrap=$(command -v bwrap 2>/dev/null || true)
+  if [ -n "$path_bwrap" ] && bwrap_is_compatible "$path_bwrap"; then
+    SOURCE_BWRAP="$path_bwrap"
+    BWRAP_SOURCE_KIND=path
+    return
+  fi
+
+  cat >&2 <<EOF
+No compatible bubblewrap binary was found for the Linux read-only sandbox.
+Install the official Codex standalone package first, or rerun this installer
+with --bwrap PATH pointing to a trusted user-owned bwrap binary. No sudo or
+system-wide package installation is required.
+EOF
+  exit 1
+}
+
+verify_codex_bwrap_digest() {
+  binary="$1"
+  embedded_bwrap_sha256=$(
+    "$binary" debug bwrap-digest 2>/dev/null
+  ) || {
+    echo "Codex binary cannot report its embedded bwrap digest: $binary" >&2
+    exit 1
+  }
+  if [ "$embedded_bwrap_sha256" != "$BWRAP_SHA256" ]; then
+    cat >&2 <<EOF
+Codex binary and bundled bwrap do not match.
+  binary:         $binary
+  binary expects: $embedded_bwrap_sha256
+  bwrap digest:   $BWRAP_SHA256
+Build Codex Lab with this installer, or provide the bwrap packaged with that binary.
+EOF
+    exit 1
   fi
 }
 
@@ -245,6 +323,7 @@ CODEX_LAB_INSTALL_ROOT=\${CODEX_LAB_INSTALL_ROOT:-'$INSTALL_ROOT'}
 
 export CODEX_HOME=\${CODEX_LAB_HOME:-\$DEFAULT_CODEX_LAB_HOME}
 export CODEX_SQLITE_HOME=\${CODEX_SHARED_STATE_HOME:-\$DEFAULT_CODEX_SHARED_STATE_HOME}
+export CODEX_PREFER_BUNDLED_BWRAP=1
 exec "\$CODEX_LAB_INSTALL_ROOT/current/bin/codex" "\$@"
 EOF
   chmod 0755 "$staged_launcher"
@@ -272,18 +351,27 @@ maybe_strip_binary() {
 
 warn_if_linux_sandbox_unavailable() {
   [ "$(uname -s 2>/dev/null || true)" = Linux ] || return 0
-  if ! command -v bwrap >/dev/null 2>&1; then
-    warn "bubblewrap is not installed; read-only explorer/reviewer agents will be refused. On Debian/Ubuntu run: sudo apt-get update && sudo apt-get install -y bubblewrap"
-    return 0
-  fi
-  if ! bwrap --unshare-user --unshare-pid --proc /proc --dev /dev --ro-bind / / -- /bin/true >/dev/null 2>&1; then
-    warn "bubblewrap cannot create a user namespace; read-only explorer/reviewer agents will be refused. Enable unprivileged user namespaces according to your system policy, then run: codex-lab doctor"
+  bundled_bwrap="$RELEASE_DIR/codex-resources/bwrap"
+  if ! "$bundled_bwrap" --unshare-user --unshare-pid --proc /proc --dev /dev --ro-bind / / -- /bin/true >/dev/null 2>&1; then
+    warn "The bundled bubblewrap cannot create the required namespaces; read-only explorer/reviewer agents will be refused. Enable unprivileged user namespaces according to your system policy, then run: codex-lab doctor"
   fi
 }
 
 parse_args "$@"
 check_shared_rollout_dir sessions
 check_shared_rollout_dir archived_sessions
+resolve_bwrap_source
+
+if [ -n "$SOURCE_BWRAP" ]; then
+  BWRAP_SHA256=$(sha256_file "$SOURCE_BWRAP")
+  if [ "$BWRAP_SHA256" = unavailable ]; then
+    echo "sha256sum or shasum is required to verify the bundled bwrap." >&2
+    exit 1
+  fi
+else
+  BWRAP_SOURCE_KIND=not-required
+  BWRAP_SHA256=not-required
+fi
 
 if [ -z "$SOURCE_BINARY" ]; then
   command -v cargo >/dev/null 2>&1 || {
@@ -291,7 +379,11 @@ if [ -z "$SOURCE_BINARY" ]; then
     exit 1
   }
   step "Building codex-cli in release mode"
-  (cd "$CODEX_RS_DIR" && cargo build --release -p codex-cli)
+  if [ "$BWRAP_SHA256" = not-required ]; then
+    (cd "$CODEX_RS_DIR" && cargo build --release -p codex-cli)
+  else
+    (cd "$CODEX_RS_DIR" && CODEX_BWRAP_SHA256="$BWRAP_SHA256" cargo build --release -p codex-cli)
+  fi
   SOURCE_BINARY="$CODEX_RS_DIR/target/release/codex"
 fi
 
@@ -299,6 +391,10 @@ fi
   echo "Codex binary is not executable: $SOURCE_BINARY" >&2
   exit 1
 }
+
+if [ "$(uname -s 2>/dev/null || true)" = Linux ]; then
+  verify_codex_bwrap_digest "$SOURCE_BINARY"
+fi
 
 if [ -z "$RELEASE_ID" ]; then
   RELEASE_ID=$(default_release_id)
@@ -328,11 +424,29 @@ cp "$SOURCE_BINARY" "$STAGING_DIR/bin/codex"
 chmod 0755 "$STAGING_DIR/bin/codex"
 maybe_strip_binary "$STAGING_DIR/bin/codex"
 
+if [ -n "$SOURCE_BWRAP" ]; then
+  verify_codex_bwrap_digest "$STAGING_DIR/bin/codex"
+fi
+
+if [ -n "$SOURCE_BWRAP" ]; then
+  mkdir -p "$STAGING_DIR/codex-resources"
+  cp "$SOURCE_BWRAP" "$STAGING_DIR/codex-resources/bwrap"
+  chmod 0755 "$STAGING_DIR/codex-resources/bwrap"
+  staged_bwrap_sha256=$(sha256_file "$STAGING_DIR/codex-resources/bwrap")
+  if [ "$staged_bwrap_sha256" != "$BWRAP_SHA256" ]; then
+    echo "Bundled bwrap changed while it was being installed." >&2
+    exit 1
+  fi
+fi
+
 binary_sha256=$(sha256_file "$STAGING_DIR/bin/codex")
 cat >"$STAGING_DIR/manifest.txt" <<EOF
 release_id=$RELEASE_ID
 source_binary=$SOURCE_BINARY
 binary_sha256=$binary_sha256
+bwrap_source=$SOURCE_BWRAP
+bwrap_source_kind=$BWRAP_SOURCE_KIND
+bwrap_sha256=$BWRAP_SHA256
 built_at=$(date '+%Y-%m-%dT%H:%M:%S%z')
 EOF
 
@@ -341,6 +455,13 @@ if [ -e "$RELEASE_DIR" ]; then
   if [ "$existing_sha256" != "$binary_sha256" ]; then
     echo "Release $RELEASE_ID already exists with a different binary." >&2
     exit 1
+  fi
+  if [ -n "$SOURCE_BWRAP" ]; then
+    existing_bwrap="$RELEASE_DIR/codex-resources/bwrap"
+    if [ ! -x "$existing_bwrap" ] || [ "$(sha256_file "$existing_bwrap")" != "$BWRAP_SHA256" ]; then
+      echo "Release $RELEASE_ID already exists with a different bundled bwrap." >&2
+      exit 1
+    fi
   fi
   rm -rf "$STAGING_DIR"
 else

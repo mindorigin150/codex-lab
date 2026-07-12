@@ -23,14 +23,19 @@ cd codex-lab
 bash scripts/install/install-codex-lab.sh
 ```
 
-The source build requires a working Rust toolchain with `cargo`. On Linux,
-read-only explorer and reviewer agents also require Bubblewrap:
+The source build requires a working Rust toolchain with `cargo`. On Linux, the
+installer copies the Bubblewrap binary bundled with the official standalone
+Codex installation into the Codex Lab release, so no `sudo` or system package
+installation is required. If that installation is not available, provide a
+trusted user-owned binary explicitly:
 
 ```shell
-# Debian/Ubuntu
-sudo apt-get update
-sudo apt-get install -y bubblewrap
+bash scripts/install/install-codex-lab.sh --bwrap "$HOME/.local/bin/bwrap"
 ```
+
+The Linux kernel must still allow unprivileged user namespaces. Run
+`codex-lab doctor` after installation to verify the effective read-only
+sandbox.
 
 Make sure the launcher directory is on `PATH`, then validate and start the lab
 build:
