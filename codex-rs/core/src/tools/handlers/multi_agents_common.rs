@@ -2,8 +2,12 @@ use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
 use crate::function_tool::FunctionCallError;
+#[cfg(target_os = "linux")]
+use crate::landlock::spawn_command_under_linux_sandbox;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+#[cfg(target_os = "linux")]
+use crate::spawn::StdioPolicy;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -19,8 +23,12 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use codex_sandboxing::policy_transforms::intersect_runtime_permission_profiles;
+#[cfg(target_os = "linux")]
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
 
 /// Minimum wait timeout to prevent tight polling loops from burning CPU.
 pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
@@ -246,6 +254,80 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
             FunctionCallError::RespondToModel(format!("permission_profile is invalid: {err}"))
         })?;
     Ok(())
+}
+
+/// Verifies that a restrictive Linux child profile can actually enter the sandbox.
+///
+/// This must run after role/parent permission intersection and before AgentControl is
+/// asked to reserve registry or barrier state.  In particular, never silently run a
+/// read-only agent without filesystem enforcement when bubblewrap is unavailable.
+pub(crate) async fn preflight_spawn_agent_sandbox(
+    config: &Config,
+) -> Result<(), FunctionCallError> {
+    crate::probe_spawn_agent_sandbox(config)
+        .await
+        .map_err(|detail| sandbox_preflight_error(&detail))
+}
+
+/// Runs the same effective Linux sandbox probe used before child creation.
+/// Exposed for `codex doctor` so diagnostics cannot disagree with spawn behavior.
+pub async fn probe_spawn_agent_sandbox(config: &Config) -> Result<(), String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = config;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let permission_profile = config.permissions.effective_permission_profile();
+        if config.features.use_legacy_landlock()
+            || permission_profile
+                .file_system_sandbox_policy()
+                .has_full_disk_write_access()
+        {
+            return Ok(());
+        }
+
+        // Most core unit-test sessions intentionally do not package the Linux helper. Keep those
+        // tests host-independent; the dedicated preflight test supplies a missing helper path and
+        // therefore still exercises the real rejection path below.
+        #[cfg(test)]
+        if config.codex_linux_sandbox_exe.is_none() {
+            return Ok(());
+        }
+
+        let helper = config
+            .codex_linux_sandbox_exe
+            .as_ref()
+            .ok_or_else(|| "the codex-linux-sandbox helper is unavailable".to_string())?;
+        let cwd = AbsolutePathBuf::from_absolute_path(&config.cwd)
+            .map_err(|err| format!("the child working directory is invalid: {err}"))?;
+        let mut child = spawn_command_under_linux_sandbox(
+            helper,
+            vec!["/bin/true".to_string()],
+            cwd.clone(),
+            &permission_profile,
+            &cwd,
+            false,
+            StdioPolicy::RedirectForShellTool,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        let status = child.wait().await.map_err(|err| err.to_string())?;
+        if !status.success() {
+            return Err(format!("sandbox probe exited with {status}"));
+        }
+        Ok(())
+    }
+}
+
+fn sandbox_preflight_error(detail: &str) -> FunctionCallError {
+    FunctionCallError::RespondToModel(format!(
+        "Cannot start a read-only sub-agent because the Linux sandbox preflight failed: {detail}. Install bubblewrap (`sudo apt-get update && sudo apt-get install -y bubblewrap` on Debian/Ubuntu), ensure unprivileged user namespaces are enabled, restart Codex Lab, and run `codex-lab doctor`. The agent was not started."
+    ))
 }
 
 pub(crate) async fn apply_requested_spawn_agent_model_overrides(

@@ -19,6 +19,45 @@ use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
 #[tokio::test]
+async fn batch_residency_reservation_is_all_or_nothing() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    // The configured total includes Main, leaving exactly one V2 child residency slot.
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    manager
+        .start_thread(config.clone())
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+
+    let err = control
+        .reserve_v2_batch_residency_slots(&[config.clone(), config.clone()])
+        .await
+        .err()
+        .expect("two-task batch must not fit one residency slot");
+    assert!(
+        matches!(err, CodexErr::AgentLimitReached { max_threads: 1 }),
+        "unexpected batch reservation error: {err:?}"
+    );
+
+    // The failed batch must release the first pending slot.
+    let slots = control
+        .reserve_v2_batch_residency_slots(&[config])
+        .await
+        .expect("failed batch should not retain partial capacity");
+    assert_eq!(slots.len(), 1);
+}
+
+#[tokio::test]
 async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
     let mut config = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);

@@ -16,6 +16,7 @@ use codex_protocol::items::CollabAgentTool;
 use codex_protocol::items::CollabAgentToolCallItem;
 use codex_protocol::items::CollabAgentToolCallStatus;
 use codex_protocol::items::SubAgentActivityItem;
+use codex_protocol::items::SubAgentActivityOperation;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -30,6 +31,7 @@ pub(crate) use followup_task::Handler as FollowupTaskHandler;
 pub(crate) use interrupt_agent::Handler as InterruptAgentHandler;
 pub(crate) use list_agents::Handler as ListAgentsHandler;
 pub(crate) use send_message::Handler as SendMessageHandler;
+pub(crate) use spawn::BatchHandler as SpawnAgentsHandler;
 pub(crate) use spawn::Handler as SpawnAgentHandler;
 pub(crate) use wait::Handler as WaitAgentHandler;
 

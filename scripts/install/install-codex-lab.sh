@@ -270,6 +270,17 @@ maybe_strip_binary() {
   esac
 }
 
+warn_if_linux_sandbox_unavailable() {
+  [ "$(uname -s 2>/dev/null || true)" = Linux ] || return 0
+  if ! command -v bwrap >/dev/null 2>&1; then
+    warn "bubblewrap is not installed; read-only explorer/reviewer agents will be refused. On Debian/Ubuntu run: sudo apt-get update && sudo apt-get install -y bubblewrap"
+    return 0
+  fi
+  if ! bwrap --unshare-user --unshare-pid --proc /proc --dev /dev --ro-bind / / -- /bin/true >/dev/null 2>&1; then
+    warn "bubblewrap cannot create a user namespace; read-only explorer/reviewer agents will be refused. Enable unprivileged user namespaces according to your system policy, then run: codex-lab doctor"
+  fi
+}
+
 parse_args "$@"
 check_shared_rollout_dir sessions
 check_shared_rollout_dir archived_sessions
@@ -342,6 +353,7 @@ step "Configuring isolated lab config with shared conversation history"
 ensure_shared_rollout_dir sessions
 ensure_shared_rollout_dir archived_sessions
 install_launcher
+warn_if_linux_sandbox_unavailable
 
 if is_true "$RUN_DOCTOR"; then
   step "Validating codex-lab"

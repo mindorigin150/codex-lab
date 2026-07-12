@@ -4,6 +4,69 @@ use crate::context_manager::is_user_turn_boundary;
 use codex_protocol::protocol::SessionContextWindow;
 use uuid::Uuid;
 
+/// Return the persisted sub-agent operations that belong to the user turns removed by a new
+/// rollback. Existing rollback markers are applied first, so repeated rollback uses the same
+/// effective-history semantics as reconstruction. Only `ItemCompleted` is inspected because the
+/// separately persisted legacy activity event is a duplicate.
+pub(super) fn sub_agent_activities_removed_by_rollback(
+    rollout_items: &[RolloutItem],
+    num_turns: u32,
+) -> Vec<codex_protocol::items::SubAgentActivityItem> {
+    #[derive(Default)]
+    struct Segment {
+        counts_as_user_turn: bool,
+        activities: Vec<codex_protocol::items::SubAgentActivityItem>,
+    }
+
+    fn finish(segment: &mut Segment, turns: &mut Vec<Segment>) {
+        if segment.counts_as_user_turn {
+            turns.push(std::mem::take(segment));
+        } else {
+            segment.activities.clear();
+        }
+    }
+
+    let mut turns = Vec::<Segment>::new();
+    let mut current = Segment::default();
+    for item in rollout_items {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
+                finish(&mut current, &mut turns);
+            }
+            RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
+                current.counts_as_user_turn = true;
+            }
+            RolloutItem::ResponseItem(item) => {
+                current.counts_as_user_turn |= is_user_turn_boundary(item);
+            }
+            RolloutItem::InterAgentCommunication(_) => {
+                current.counts_as_user_turn = true;
+            }
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
+                if let codex_protocol::items::TurnItem::SubAgentActivity(activity) = &event.item {
+                    current.activities.push(activity.clone());
+                }
+            }
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
+                finish(&mut current, &mut turns);
+                for _ in 0..rollback.num_turns {
+                    let _ = turns.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    finish(&mut current, &mut turns);
+
+    let mut removed = Vec::new();
+    for _ in 0..num_turns {
+        if let Some(segment) = turns.pop() {
+            removed.extend(segment.activities);
+        }
+    }
+    removed
+}
+
 // Return value of `Session::reconstruct_history_from_rollout`, bundling the rebuilt history with
 // the resume/fork hydration metadata derived from the same replay.
 #[derive(Debug)]
@@ -456,4 +519,66 @@ fn reconstructed_window_from_session_context_window(
         previous_id: None,
         id: Some(id),
     })
+}
+
+#[cfg(test)]
+mod rollback_activity_tests {
+    use super::*;
+    use codex_protocol::AgentPath;
+    use codex_protocol::ThreadId;
+    use codex_protocol::items::SubAgentActivityItem;
+    use codex_protocol::items::SubAgentActivityOperation;
+    use codex_protocol::items::TurnItem;
+    use codex_protocol::protocol::ItemCompletedEvent;
+    use codex_protocol::protocol::SubAgentActivityKind;
+    use codex_protocol::protocol::ThreadRolledBackEvent;
+    use codex_protocol::protocol::UserMessageEvent;
+
+    fn user(message: &str) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            client_id: None,
+            message: message.to_string(),
+            images: None,
+            image_details: Vec::new(),
+            local_images: Vec::new(),
+            local_image_details: Vec::new(),
+            text_elements: Vec::new(),
+        }))
+    }
+
+    fn activity(agent_thread_id: ThreadId, generation: u64) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: format!("turn-{generation}"),
+            item: TurnItem::SubAgentActivity(SubAgentActivityItem {
+                id: format!("call-{generation}"),
+                kind: SubAgentActivityKind::Interacted,
+                agent_thread_id,
+                agent_path: AgentPath::root().join("explorer").expect("agent path"),
+                operation: Some(SubAgentActivityOperation::Followup),
+                generation: Some(generation),
+            }),
+            completed_at_ms: 0,
+        }))
+    }
+
+    #[test]
+    fn repeated_rollback_collects_only_current_effective_tail() {
+        let first = ThreadId::new();
+        let second = ThreadId::new();
+        let items = vec![
+            user("one"),
+            activity(first, 1),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            user("two"),
+            activity(second, 2),
+        ];
+
+        let removed = sub_agent_activities_removed_by_rollback(&items, 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].agent_thread_id, second);
+        assert_eq!(removed[0].generation, Some(2));
+    }
 }

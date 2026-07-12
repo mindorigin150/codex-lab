@@ -18,6 +18,7 @@ use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::SpawnAgentsHandler as SpawnAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::empty_extension_registry;
@@ -58,6 +59,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::user_input::UserInput;
+use codex_sandboxing::policy_transforms::intersect_runtime_permission_profiles;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
@@ -227,6 +229,65 @@ async fn spawn_agent_rejects_empty_message() {
     assert_eq!(
         err,
         FunctionCallError::RespondToModel("Empty message can't be sent to an agent".to_string())
+    );
+}
+
+#[tokio::test]
+async fn spawn_agents_preflights_every_task_before_starting_any_child() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    let _ = config.features.enable(Feature::UseLegacyLandlock);
+    turn.config = Arc::new(config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let parent_thread_id = session.thread_id;
+    let result = SpawnAgentsHandlerV2::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agents",
+            function_payload(json!({
+                "tasks": [
+                    {
+                        "task_name": "would_have_started",
+                        "agent_type": "worker",
+                        "message": "read the repository"
+                    },
+                    {
+                        "task_name": "bad_role",
+                        "agent_type": "role-that-does-not-exist",
+                        "message": "this must fail during prepare"
+                    }
+                ]
+            })),
+        ))
+        .await;
+
+    let Err(err) = result else {
+        panic!("the second task should fail role preflight");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "unknown agent_type 'role-that-does-not-exist'".to_string()
+        )
+    );
+    assert!(
+        session
+            .services
+            .agent_control
+            .blocking_agent_targets(parent_thread_id)
+            .is_empty(),
+        "a failed batch preflight must not register a blocking barrier target"
+    );
+    assert!(
+        session
+            .services
+            .agent_control
+            .resolve_agent_reference(parent_thread_id, &turn.session_source, "would_have_started",)
+            .await
+            .is_err(),
+        "a failed batch preflight must not start an earlier child"
     );
 }
 
@@ -2524,6 +2585,18 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     config.approvals_reviewer = ApprovalsReviewer::AutoReview;
     set_turn_config(&mut turn, config);
     turn.permission_profile = expected_permission_profile.clone();
+    #[allow(deprecated)]
+    let expected_child_permission_profile = intersect_runtime_permission_profiles(
+        PermissionProfile::read_only(),
+        expected_permission_profile.clone(),
+        turn.cwd.as_path(),
+    );
+    let expected_child_file_system_sandbox_policy = expected_child_permission_profile
+        .file_system_sandbox_policy()
+        .clone();
+    let expected_child_network_sandbox_policy = expected_child_permission_profile
+        .network_sandbox_policy()
+        .clone();
     assert_ne!(
         expected_permission_profile,
         turn.config.permissions.effective_permission_profile(),
@@ -2563,7 +2636,10 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     assert_eq!(snapshot.sandbox_policy(), expected_sandbox);
     assert_eq!(snapshot.approval_policy, AskForApproval::OnRequest);
     assert_eq!(snapshot.approvals_reviewer, ApprovalsReviewer::AutoReview);
-    assert_eq!(snapshot.permission_profile, expected_permission_profile);
+    assert_eq!(
+        snapshot.permission_profile,
+        expected_child_permission_profile
+    );
     let child_thread = manager
         .get_thread(agent_id)
         .await
@@ -2571,13 +2647,16 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     let child_turn = child_thread.codex.session.new_default_turn().await;
     assert_eq!(
         child_turn.file_system_sandbox_policy(),
-        expected_file_system_sandbox_policy
+        expected_child_file_system_sandbox_policy
     );
     assert_eq!(
         child_turn.network_sandbox_policy(),
-        expected_network_sandbox_policy
+        expected_child_network_sandbox_policy
     );
-    assert_eq!(child_turn.permission_profile(), expected_permission_profile);
+    assert_eq!(
+        child_turn.permission_profile(),
+        expected_child_permission_profile
+    );
 }
 
 #[tokio::test]
@@ -3509,6 +3588,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.agent_max_depth = 2;
     set_turn_config(&mut turn, config);
 
     let session = Arc::new(session);
@@ -4214,22 +4294,14 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     expected.base_instructions = Some(base_instructions.text);
     expected.model = Some(turn.model_info.slug.clone());
     expected.model_provider = turn.provider.info().clone();
-    expected.model_reasoning_effort = turn.reasoning_effort.clone();
+    expected.model_reasoning_effort = turn
+        .reasoning_effort
+        .clone()
+        .or_else(|| turn.model_info.default_reasoning_level.clone());
     expected.model_reasoning_summary = Some(turn.reasoning_summary);
     expected.developer_instructions = turn.developer_instructions.clone();
-    #[allow(deprecated)]
-    {
-        expected.cwd = turn.cwd.clone();
-    }
-    expected
-        .permissions
-        .approval_policy
-        .set(AskForApproval::OnRequest)
-        .expect("approval policy set");
-    expected
-        .permissions
-        .set_permission_profile(permission_profile)
-        .expect("permission profile set");
+    apply_spawn_agent_runtime_overrides(&mut expected, &turn)
+        .expect("runtime overrides should apply to expected config");
     assert_eq!(config, expected);
 }
 
@@ -4275,6 +4347,34 @@ async fn spawn_runtime_permissions_apply_role_and_parent_intersection() {
         explorer_config.permissions.effective_permission_profile(),
         PermissionProfile::read_only()
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn restrictive_spawn_preflight_rejects_missing_linux_sandbox_helper() {
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.codex_linux_sandbox_exe = Some(
+        config
+            .codex_home
+            .as_path()
+            .join("missing-codex-linux-sandbox"),
+    );
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::read_only())
+        .expect("read-only profile");
+
+    let err = preflight_spawn_agent_sandbox(&config)
+        .await
+        .expect_err("restrictive child must not start without sandbox helper");
+    let message = err.to_string();
+    assert!(
+        message.contains("Linux sandbox preflight failed"),
+        "{message}"
+    );
+    assert!(message.contains("bubblewrap"), "{message}");
+    assert!(message.contains("agent was not started"), "{message}");
 }
 
 #[tokio::test]

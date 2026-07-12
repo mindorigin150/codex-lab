@@ -118,6 +118,7 @@ async fn handle_spawn_agent(
     )
     .await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    super::super::multi_agents_common::preflight_spawn_agent_sandbox(&config).await?;
 
     let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
         config,

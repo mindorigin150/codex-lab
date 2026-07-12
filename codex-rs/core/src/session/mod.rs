@@ -1850,6 +1850,18 @@ impl Session {
             return;
         }
 
+        if !self
+            .services
+            .agent_control
+            .should_deliver_completion(self.thread_id)
+        {
+            debug!(
+                child_thread_id = %self.thread_id,
+                "suppressed completion notification for a rolled-back agent generation"
+            );
+            return;
+        }
+
         self.forward_child_completion_to_parent(
             turn_context,
             *parent_thread_id,

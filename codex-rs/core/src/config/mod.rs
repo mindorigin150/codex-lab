@@ -248,7 +248,9 @@ Payload:
 You may also see them addressed as to=/root/..., which indicates your identity is /root/...
 "#;
 const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "agents";
-const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that multi-agent tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the exact recipient shown in their tool definitions (for example, `to=functions.agents.spawn_agent` when that recipient is displayed), since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that multi-agent tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `spawn_agents`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the exact recipient shown in their tool definitions (for example, `to=functions.agents.spawn_agent` when that recipient is displayed), since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+
+When you identify multiple independent bounded tasks, call `spawn_agents` once to start the whole batch before waiting. Spawn and wait serially only when a later task genuinely depends on an earlier result.
 
 All agents share the same directory. In detail:
 - All agents have access to the same container and filesystem as you.

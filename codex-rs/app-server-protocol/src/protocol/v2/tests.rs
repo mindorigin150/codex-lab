@@ -2758,6 +2758,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         agent_path: codex_protocol::AgentPath::root()
             .join("worker")
             .expect("worker path"),
+        operation: None,
+        generation: None,
     });
 
     assert_eq!(

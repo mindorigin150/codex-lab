@@ -24,6 +24,8 @@ fn sub_agent_activity_is_a_terminal_tool_runtime_event() -> anyhow::Result<()> {
         agent_thread_id,
         agent_path: AgentPath::try_from("/root/reviewer").map_err(anyhow::Error::msg)?,
         kind: SubAgentActivityKind::Started,
+        operation: None,
+        generation: None,
     });
 
     let Some(ToolRuntimeTraceEvent::Ended {

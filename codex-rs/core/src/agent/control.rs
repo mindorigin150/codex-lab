@@ -50,6 +50,7 @@ use self::barrier::CompletionReceipts;
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
+pub(crate) use self::residency::V2ResidencySlot;
 
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 
@@ -188,10 +189,25 @@ impl AgentControl {
         communication: InterAgentCommunication,
         agent_communication_context: AgentCommunicationContext,
     ) -> CodexResult<String> {
+        self.send_inter_agent_communication_with_receipt(
+            agent_id,
+            communication,
+            agent_communication_context,
+        )
+        .await
+        .map(|(output, _)| output)
+    }
+
+    pub(crate) async fn send_inter_agent_communication_with_receipt(
+        &self,
+        agent_id: ThreadId,
+        communication: InterAgentCommunication,
+        agent_communication_context: AgentCommunicationContext,
+    ) -> CodexResult<(String, Option<u64>)> {
         let state = self.upgrade()?;
         self.ensure_execution_capacity_for_turn_start(agent_id, communication.trigger_turn)
             .await?;
-        self.send_inter_agent_communication_after_capacity_check(
+        self.send_inter_agent_communication_after_capacity_check_with_receipt(
             agent_id,
             &state,
             communication,
@@ -207,6 +223,23 @@ impl AgentControl {
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
     ) -> CodexResult<String> {
+        self.send_inter_agent_communication_after_capacity_check_with_receipt(
+            agent_id,
+            state,
+            communication,
+            context,
+        )
+        .await
+        .map(|(output, _)| output)
+    }
+
+    async fn send_inter_agent_communication_after_capacity_check_with_receipt(
+        &self,
+        agent_id: ThreadId,
+        state: &Arc<ThreadManagerState>,
+        communication: InterAgentCommunication,
+        context: AgentCommunicationContext,
+    ) -> CodexResult<(String, Option<u64>)> {
         let starts_generation = communication.trigger_turn;
         let generation = starts_generation.then(|| self.reserve_agent_generation(agent_id));
         let result = self
@@ -217,7 +250,7 @@ impl AgentControl {
         {
             self.cancel_agent_generation(agent_id, generation);
         }
-        result
+        result.map(|output| (output, generation))
     }
 
     async fn submit_inter_agent_communication(
@@ -358,6 +391,10 @@ impl AgentControl {
             "live agent path `{}` not found",
             agent_path.as_str()
         )))
+    }
+
+    pub(crate) fn has_live_agent_path(&self, agent_path: &AgentPath) -> bool {
+        self.state.agent_id_for_path(agent_path).is_some()
     }
 
     /// Subscribe to status updates for `agent_id`, yielding the latest value and changes.

@@ -24,7 +24,7 @@ struct V2ResidencyState {
     pending_slots: usize,
 }
 
-pub(super) struct V2ResidencySlot {
+pub(crate) struct V2ResidencySlot {
     residency: Arc<V2Residency>,
     active: bool,
 }
@@ -57,6 +57,25 @@ impl AgentControl {
         Arc::clone(&self.v2_residency)
             .reserve_slot(state, capacity, protected_thread_id)
             .await
+    }
+
+    /// Reserve all residency capacity required by a V2 batch before any child is started.
+    ///
+    /// Dropping the returned slots releases every pending reservation, so a failure while
+    /// reserving a later task cannot leave capacity consumed or an earlier child running.
+    pub(crate) async fn reserve_v2_batch_residency_slots(
+        &self,
+        configs: &[Config],
+    ) -> CodexResult<Vec<V2ResidencySlot>> {
+        let state = self.upgrade()?;
+        let mut slots = Vec::with_capacity(configs.len());
+        for config in configs {
+            slots.push(
+                self.reserve_v2_residency_slot(&state, config, /*protected_thread_id*/ None)
+                    .await?,
+            );
+        }
+        Ok(slots)
     }
 
     pub(super) async fn touch_loaded_v2_residency(

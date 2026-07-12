@@ -121,6 +121,40 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
 }
 
 #[test]
+fn spawn_agents_tool_v2_exposes_batch_task_schema() {
+    let tool = create_spawn_agents_tool_v2(SpawnAgentToolOptions {
+        available_models: vec![],
+        agent_type_description: "role help".to_string(),
+        hide_agent_type_model_reasoning: false,
+        usage_hint_text: None,
+    });
+    let ToolSpec::Function(ResponsesApiTool {
+        name,
+        description,
+        parameters,
+        ..
+    }) = tool
+    else {
+        panic!("spawn_agents should be a function tool");
+    };
+    assert_eq!(name, "spawn_agents");
+    assert!(description.contains("multiple independent agents concurrently"));
+    assert_eq!(
+        parameters.required.as_deref(),
+        Some(&["tasks".to_string()][..])
+    );
+    let tasks = parameters
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.get("tasks"))
+        .expect("tasks property");
+    assert_eq!(
+        tasks.schema_type,
+        Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Array))
+    );
+}
+
+#[test]
 fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         available_models: Vec::new(),

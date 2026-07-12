@@ -82,6 +82,7 @@ csv = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }
 eventsource-stream = { workspace = true }
+fs2 = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 iana-time-zone = { workspace = true }

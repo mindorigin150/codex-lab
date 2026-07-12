@@ -120,6 +120,56 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     })
 }
 
+pub fn create_spawn_agents_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
+    let agent_type_description = format!(
+        "This field is required in MultiAgentV2. {}",
+        options.agent_type_description
+    );
+    let mut task_properties = spawn_agent_common_properties_v2(&agent_type_description);
+    if options.hide_agent_type_model_reasoning {
+        hide_spawn_agent_model_metadata_options(&mut task_properties);
+    }
+    task_properties.insert(
+        "task_name".to_string(),
+        JsonSchema::string(Some(
+            "Task name for the new agent. Use lowercase letters, digits, and underscores."
+                .to_string(),
+        )),
+    );
+    let task_schema = JsonSchema::object(
+        task_properties,
+        Some(vec![
+            "task_name".to_string(),
+            "message".to_string(),
+            "agent_type".to_string(),
+        ]),
+        Some(false.into()),
+    );
+    let properties = BTreeMap::from([(
+        "tasks".to_string(),
+        JsonSchema::array(
+            task_schema,
+            Some("Two or more independent, bounded agent tasks to start as one batch.".to_string()),
+        ),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "spawn_agents".to_string(),
+        description: "Start multiple independent agents concurrently. When you have already identified independent scopes, use this tool before waiting instead of spawning and waiting one at a time. The batch is validated before startup and partial starts are shut down if another task fails. Dependent work must remain sequential."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["tasks".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(spawn_agents_output_schema_v2(
+            options.hide_agent_type_model_reasoning,
+        )),
+    })
+}
+
 pub fn create_send_input_tool_v1() -> ToolSpec {
     let properties = BTreeMap::from([
         (
@@ -409,6 +459,21 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
             }
         },
         "required": ["task_name", "nickname"],
+        "additionalProperties": false
+    })
+}
+
+fn spawn_agents_output_schema_v2(hide_agent_metadata: bool) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "agents": {
+                "type": "array",
+                "items": spawn_agent_output_schema_v2(hide_agent_metadata),
+                "description": "Spawned agents in the same order as the requested tasks."
+            }
+        },
+        "required": ["agents"],
         "additionalProperties": false
     })
 }
@@ -742,14 +807,14 @@ fn spawn_agent_tool_description_v2(
         {agent_role_guidance}
         Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
-The spawned agent will have the same tools allowed at its configured depth. With the default `agents.max_depth = 1`, spawned subagents are leaves and cannot delegate further.
+The spawned agent will have the same tools as you, subject to the tools allowed at its configured depth. With the default `agents.max_depth = 1`, spawned subagents are leaves and cannot delegate further.
 {inherited_model_guidance}
 Set `agent_type` explicitly. Use `explorer` for bounded read-heavy investigation, `reviewer` for high-risk review, `worker` for independent implementation, or `default` for an unclassified child task.
 Only call this tool for a concrete, bounded subtask. Explorer and reviewer work blocks local task execution until their results arrive; worker and default agents remain nonblocking and should be used only when useful local work can proceed independently.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
 
-Explorer agents always use fresh context: omit `fork_turns` or pass `fork_turns="none"`, and include all necessary scope and evidence requirements in the task. Other roles default to `fork_turns="all"`; pass `fork_turns="none"` for fresh context or a positive integer string for a bounded history fork."#
+Explorer agents always use fresh context: omit `fork_turns` or pass `fork_turns="none"`, and include all necessary scope and evidence requirements in the task. Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent. Other roles default to `fork_turns="all"`; pass `fork_turns="none"` for fresh context or a positive integer string for a bounded history fork."#
     );
 
     if let Some(usage_hint_text) = usage_hint_text {

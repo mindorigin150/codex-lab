@@ -10,6 +10,7 @@ use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
 use codex_extension_api::empty_extension_registry;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -37,6 +38,22 @@ use tempfile::tempdir;
 use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+#[test]
+fn v2_child_cannot_be_resumed_as_a_primary_thread() {
+    let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: Some(AgentPath::root().join("child").expect("child path")),
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    let error = validate_primary_resume_source(MultiAgentVersion::V2, &source)
+        .expect_err("v2 child primary resume should be rejected");
+    assert!(error.to_string().contains("cannot be resumed as primary"));
+    validate_primary_resume_source(MultiAgentVersion::V1, &source)
+        .expect("legacy recursive agent resume remains supported");
+}
 
 struct FakeAgentGraphStore {
     root_thread_id: ThreadId,

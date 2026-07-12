@@ -126,16 +126,23 @@ pub(crate) async fn handle_message_string_tool(
     let result = session
         .services
         .agent_control
-        .send_inter_agent_communication(receiver_thread_id, mode.apply(communication), context)
+        .send_inter_agent_communication_with_receipt(
+            receiver_thread_id,
+            mode.apply(communication),
+            context,
+        )
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err));
-    if let Err(err) = result {
-        session
-            .services
-            .agent_control
-            .cancel_blocking_agent_start(session.thread_id, blocking_retry);
-        return Err(err);
-    }
+    let (_, generation) = match result {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            session
+                .services
+                .agent_control
+                .cancel_blocking_agent_start(session.thread_id, blocking_retry);
+            return Err(err);
+        }
+    };
     if blocks_local_work {
         session
             .services
@@ -150,6 +157,11 @@ pub(crate) async fn handle_message_string_tool(
             agent_thread_id: receiver_thread_id,
             agent_path: receiver_agent_path,
             kind: SubAgentActivityKind::Interacted,
+            operation: Some(match mode {
+                MessageDeliveryMode::QueueOnly => SubAgentActivityOperation::SendMessage,
+                MessageDeliveryMode::TriggerTurn => SubAgentActivityOperation::Followup,
+            }),
+            generation,
         },
     )
     .await;

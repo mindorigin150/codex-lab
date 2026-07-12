@@ -83,6 +83,7 @@ use output::redact_detail;
 use output::render_human_report;
 use progress::DoctorProgress;
 use progress::doctor_progress;
+use runtime::linux_sandbox_check;
 use runtime::runtime_check;
 use runtime::search_check;
 use system::system_check;
@@ -345,7 +346,6 @@ async fn build_report(
     }));
     checks.push(run_sync_check("runtime", progress.clone(), runtime_check));
     checks.push(run_sync_check("search", progress.clone(), search_check));
-
     progress.begin("config");
     let config_result = load_config(root_config_overrides, interactive, arg0_paths).await;
     match &config_result {
@@ -361,6 +361,7 @@ async fn build_report(
                 websocket_check,
                 mcp_check,
                 sandbox_check,
+                linux_sandbox_check,
                 terminal_check,
                 git_check,
                 terminal_title_check,
@@ -384,6 +385,11 @@ async fn build_report(
                         sandbox_check(config, arg0_paths)
                     })
                 },
+                run_async_check(
+                    "linux sandbox",
+                    progress.clone(),
+                    linux_sandbox_check(config),
+                ),
                 async {
                     run_sync_check("terminal", progress.clone(), || {
                         terminal_check(command.no_color)
@@ -420,6 +426,7 @@ async fn build_report(
                 websocket_check,
                 mcp_check,
                 sandbox_check,
+                linux_sandbox_check,
                 terminal_check,
                 git_check,
                 terminal_title_check,

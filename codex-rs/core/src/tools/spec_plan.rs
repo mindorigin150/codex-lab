@@ -49,6 +49,7 @@ use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::SpawnAgentsHandler as SpawnAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
@@ -815,6 +816,21 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(
                     SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+                        available_models: turn_context.available_models.clone(),
+                        agent_type_description: agent_type_description.clone(),
+                        hide_agent_type_model_reasoning: turn_context
+                            .config
+                            .multi_agent_v2
+                            .hide_spawn_agent_metadata,
+                        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                    }),
+                    tool_namespace,
+                ),
+                exposure,
+            ));
+            planned_tools.add_arc(override_tool_exposure(
+                multi_agent_v2_handler(
+                    SpawnAgentsHandlerV2::new(SpawnAgentToolOptions {
                         available_models: turn_context.available_models.clone(),
                         agent_type_description,
                         hide_agent_type_model_reasoning: turn_context

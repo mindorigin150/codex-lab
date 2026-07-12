@@ -22,6 +22,7 @@ use crate::tasks::CompactTask;
 use crate::tasks::UserShellCommandMode;
 use crate::tasks::UserShellCommandTask;
 use crate::tasks::execute_user_shell_command;
+use codex_protocol::items::SubAgentActivityOperation;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -530,11 +531,94 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
 
     let rollback_event = ThreadRolledBackEvent { num_turns };
     let rollback_msg = EventMsg::ThreadRolledBack(rollback_event.clone());
+    // Persist the history decision before destructive agent cleanup. `append_items` flushes the
+    // recorder before returning, so a second flush here would create an ambiguous failure window:
+    // the marker could already be durable while in-memory rollback cleanup is skipped.
+    if let Err(err) = live_thread
+        .append_items(&[RolloutItem::EventMsg(rollback_msg.clone())])
+        .await
+    {
+        sess.send_event_raw(Event {
+            id: turn_context.sub_id.clone(),
+            msg: EventMsg::Error(ErrorEvent {
+                message: format!("failed to append rollback marker: {err}"),
+                codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+            }),
+        })
+        .await;
+        return;
+    }
     let replay_items = stored_history
         .items
         .into_iter()
         .chain(std::iter::once(RolloutItem::EventMsg(rollback_msg.clone())))
         .collect::<Vec<_>>();
+
+    // Tombstone/cancel affected generations before reconstructing Main. This closes the race in
+    // which a completion arrives after its creating/followup turn has disappeared.
+    let removed_agent_activities =
+        super::rollout_reconstruction::sub_agent_activities_removed_by_rollback(
+            &replay_items[..replay_items.len().saturating_sub(1)],
+            num_turns,
+        );
+    for activity in &removed_agent_activities {
+        match activity.operation {
+            Some(SubAgentActivityOperation::Spawn) | None
+                if matches!(
+                    activity.kind,
+                    codex_protocol::protocol::SubAgentActivityKind::Started
+                ) =>
+            {
+                sess.services.agent_control.cleanup_rolled_back_agent(
+                    sess.thread_id(),
+                    activity.agent_thread_id,
+                    activity.generation,
+                );
+                if let Err(err) = sess
+                    .services
+                    .agent_control
+                    .close_agent(activity.agent_thread_id)
+                    .await
+                {
+                    warn!(agent_id = %activity.agent_thread_id, %err, "failed to close rolled-back spawned agent");
+                }
+            }
+            Some(SubAgentActivityOperation::Followup) => {
+                let should_interrupt = activity.generation.is_some_and(|generation| {
+                    sess.services
+                        .agent_control
+                        .current_agent_generation(activity.agent_thread_id)
+                        == Some(generation)
+                });
+                sess.services.agent_control.cleanup_rolled_back_agent(
+                    sess.thread_id(),
+                    activity.agent_thread_id,
+                    activity.generation,
+                );
+                if should_interrupt
+                    && let Err(err) = sess
+                        .services
+                        .agent_control
+                        .interrupt_agent(activity.agent_thread_id)
+                        .await
+                {
+                    warn!(agent_id = %activity.agent_thread_id, %err, "failed to interrupt rolled-back followup generation");
+                }
+            }
+            Some(SubAgentActivityOperation::SendMessage) => {
+                // Queue-only messages have no generation and may already be persisted in the
+                // recipient. Suppress barrier state, but do not destroy the pre-existing agent.
+                sess.services.agent_control.cleanup_rolled_back_agent(
+                    sess.thread_id(),
+                    activity.agent_thread_id,
+                    activity.generation,
+                );
+            }
+            Some(SubAgentActivityOperation::Interrupt)
+            | Some(SubAgentActivityOperation::Spawn)
+            | None => {}
+        }
+    }
     sess.apply_rollout_reconstruction(turn_context.as_ref(), replay_items.as_slice())
         .await;
     sess.services
@@ -542,20 +626,6 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         .rollout_budget()
         .rearm_reminder(sess.thread_id());
     sess.recompute_token_usage(turn_context.as_ref()).await;
-
-    sess.persist_rollout_items(&[RolloutItem::EventMsg(rollback_msg.clone())])
-        .await;
-    if let Err(err) = sess.flush_rollout().await {
-        sess.send_event(
-            turn_context.as_ref(),
-            EventMsg::Warning(WarningEvent {
-                message: format!(
-                    "Rolled the thread back, but failed to save the rollback marker. Codex will continue retrying. Error: {err}"
-                ),
-            }),
-        )
-        .await;
-    }
 
     sess.deliver_event_raw(Event {
         id: turn_context.sub_id.clone(),

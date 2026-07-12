@@ -17,6 +17,8 @@ struct CompletionProgress {
     current_generation: u64,
     pending_generations: VecDeque<u64>,
     delivered: Option<(u64, AgentStatus)>,
+    cancelled_generations: HashSet<u64>,
+    suppressed_completions: VecDeque<u64>,
 }
 
 #[derive(Default)]
@@ -45,6 +47,19 @@ impl AgentControl {
     }
 
     pub(super) fn cancel_agent_generation(&self, agent_id: ThreadId, generation: u64) {
+        self.remove_agent_generation(agent_id, generation, /*suppress_completion*/ false);
+    }
+
+    fn suppress_agent_generation(&self, agent_id: ThreadId, generation: u64) {
+        self.remove_agent_generation(agent_id, generation, /*suppress_completion*/ true);
+    }
+
+    fn remove_agent_generation(
+        &self,
+        agent_id: ThreadId,
+        generation: u64,
+        suppress_completion: bool,
+    ) {
         let mut receipts = self
             .completion_receipts
             .0
@@ -53,9 +68,14 @@ impl AgentControl {
         let Some(progress) = receipts.get_mut(&agent_id) else {
             return;
         };
+        let was_pending = progress.pending_generations.contains(&generation);
         progress
             .pending_generations
             .retain(|pending| *pending != generation);
+        if was_pending && suppress_completion {
+            progress.cancelled_generations.insert(generation);
+            progress.suppressed_completions.push_back(generation);
+        }
         if progress.current_generation == generation {
             progress.current_generation = progress
                 .pending_generations
@@ -64,6 +84,55 @@ impl AgentControl {
                 .or_else(|| progress.delivered.as_ref().map(|(delivered, _)| *delivered))
                 .unwrap_or_default();
         }
+    }
+
+    pub(crate) fn current_agent_generation(&self, agent_id: ThreadId) -> Option<u64> {
+        let receipts = self
+            .completion_receipts
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        receipts.get(&agent_id).and_then(|progress| {
+            (progress.current_generation != 0).then_some(progress.current_generation)
+        })
+    }
+
+    /// Tombstone the currently active generation so shutdown/rollback cannot deliver its late
+    /// terminal notification to the parent. Returns the generation that was suppressed.
+    pub(crate) fn suppress_current_generation(&self, agent_id: ThreadId) -> Option<u64> {
+        let generation = self.current_agent_generation(agent_id)?;
+        self.suppress_agent_generation(agent_id, generation);
+        Some(generation)
+    }
+
+    /// Returns false when rollback cancelled the generation whose terminal notification is next.
+    /// The cancelled receipt is consumed here so a later generation can still complete normally.
+    pub(crate) fn should_deliver_completion(&self, agent_id: ThreadId) -> bool {
+        let mut receipts = self
+            .completion_receipts
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(progress) = receipts.get_mut(&agent_id) else {
+            return true;
+        };
+        let Some(generation) = progress.suppressed_completions.pop_front() else {
+            return true;
+        };
+        progress.cancelled_generations.remove(&generation);
+        false
+    }
+
+    pub(crate) fn cleanup_rolled_back_agent(
+        &self,
+        parent_thread_id: ThreadId,
+        agent_id: ThreadId,
+        generation: Option<u64>,
+    ) {
+        if let Some(generation) = generation {
+            self.suppress_agent_generation(agent_id, generation);
+        }
+        self.settle_blocking_agents(parent_thread_id, &[agent_id], /*failed*/ false);
     }
 
     pub(crate) fn record_completion_delivery(&self, agent_id: ThreadId, status: AgentStatus) {

@@ -78,6 +78,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -793,6 +794,10 @@ impl ThreadManager {
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        let resumed_multi_agent_version = initial_history
+            .get_multi_agent_version()
+            .unwrap_or_else(|| config.multi_agent_version_from_features());
+        validate_primary_resume_source(resumed_multi_agent_version, &session_source)?;
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
@@ -907,6 +912,8 @@ impl ThreadManager {
                 .collect::<Vec<_>>()
         };
 
+        self.prepare_v2_threads_for_shutdown(&threads).await;
+
         let mut shutdowns = threads
             .into_iter()
             .map(|(thread_id, thread)| async move {
@@ -944,6 +951,58 @@ impl ThreadManager {
             .timed_out
             .sort_by_key(std::string::ToString::to_string);
         report
+    }
+
+    /// Prevent child completions from racing process teardown, and make persisted v2 spawn
+    /// edges non-resumable before writer leases are released. V2 descendants are intentionally
+    /// re-delegated by Main after resume rather than recursively restarted.
+    async fn prepare_v2_threads_for_shutdown(&self, threads: &[(ThreadId, Arc<CodexThread>)]) {
+        let mut descendants_to_close = HashSet::new();
+        for (thread_id, thread) in threads {
+            if thread.multi_agent_version() != Some(MultiAgentVersion::V2) {
+                continue;
+            }
+            if matches!(thread.session_source, SessionSource::SubAgent(_)) {
+                thread
+                    .codex
+                    .session
+                    .services
+                    .agent_control
+                    .suppress_current_generation(*thread_id);
+                descendants_to_close.insert(*thread_id);
+            }
+            if let Some(agent_graph_store) = self.state.agent_graph_store.as_ref() {
+                match agent_graph_store
+                    .list_thread_spawn_descendants(
+                        *thread_id,
+                        Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
+                    )
+                    .await
+                {
+                    Ok(descendants) => descendants_to_close.extend(descendants),
+                    Err(error) => warn!(
+                        "failed to list v2 descendants while shutting down {thread_id}: {error}"
+                    ),
+                }
+            }
+        }
+
+        let Some(agent_graph_store) = self.state.agent_graph_store.as_ref() else {
+            return;
+        };
+        for descendant_id in descendants_to_close {
+            if let Err(error) = agent_graph_store
+                .set_thread_spawn_edge_status(
+                    descendant_id,
+                    codex_agent_graph_store::ThreadSpawnEdgeStatus::Closed,
+                )
+                .await
+            {
+                warn!(
+                    "failed to close v2 descendant {descendant_id} during process shutdown: {error}"
+                );
+            }
+        }
     }
 
     /// Fork an existing thread by snapshotting rollout history according to
@@ -1085,6 +1144,21 @@ impl ThreadManager {
             .and_then(|ops_log| ops_log.lock().ok().map(|log| log.clone()))
             .unwrap_or_default()
     }
+}
+
+fn validate_primary_resume_source(
+    multi_agent_version: MultiAgentVersion,
+    session_source: &SessionSource,
+) -> CodexResult<()> {
+    if multi_agent_version == MultiAgentVersion::V2
+        && matches!(session_source, SessionSource::SubAgent(_))
+    {
+        return Err(CodexErr::InvalidRequest(
+            "MultiAgentV2 child threads cannot be resumed as primary sessions. Resume the root session, or fork this child to create an independent thread."
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl ThreadManagerState {
@@ -1539,6 +1613,8 @@ impl ThreadManagerState {
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
+        let is_primary_resume = is_resumed_thread && parent_thread_id.is_none();
+        let mut writer_lease = None;
         if let InitialHistory::Resumed(resumed) = &initial_history {
             let mut threads = self.threads.write().await;
             if let Some(thread) = threads.get(&resumed.conversation_id).cloned() {
@@ -1558,6 +1634,10 @@ impl ThreadManagerState {
                     });
                 }
                 threads.remove(&resumed.conversation_id);
+            }
+            if let Some(rollout_path) = resumed.rollout_path.as_deref() {
+                writer_lease =
+                    Some(self.acquire_thread_writer_lease(resumed.conversation_id, rollout_path)?);
             }
         }
         let user_instructions = self
@@ -1625,12 +1705,47 @@ impl ThreadManagerState {
         }))
         .await?;
         let new_thread = self
-            .finalize_thread_spawn(codex, thread_id, tracked_session_source)
+            .finalize_thread_spawn(codex, thread_id, tracked_session_source, writer_lease)
             .await?;
         if is_resumed_thread {
             new_thread.thread.emit_thread_resume_lifecycle().await;
         }
+        if is_primary_resume && multi_agent_version == Some(MultiAgentVersion::V2) {
+            self.close_stale_v2_descendants(thread_id).await;
+        }
         Ok(new_thread)
+    }
+
+    async fn close_stale_v2_descendants(&self, root_thread_id: ThreadId) {
+        let Some(agent_graph_store) = self.agent_graph_store.as_ref() else {
+            return;
+        };
+        let descendants = match agent_graph_store
+            .list_thread_spawn_descendants(
+                root_thread_id,
+                Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
+            )
+            .await
+        {
+            Ok(descendants) => descendants,
+            Err(error) => {
+                warn!("failed to reconcile stale v2 descendants for {root_thread_id}: {error}");
+                return;
+            }
+        };
+        for descendant_id in descendants {
+            if let Err(error) = agent_graph_store
+                .set_thread_spawn_edge_status(
+                    descendant_id,
+                    codex_agent_graph_store::ThreadSpawnEdgeStatus::Closed,
+                )
+                .await
+            {
+                warn!(
+                    "failed to close stale v2 descendant {descendant_id} while resuming {root_thread_id}: {error}"
+                );
+            }
+        }
     }
 
     async fn finalize_thread_spawn(
@@ -1638,6 +1753,7 @@ impl ThreadManagerState {
         codex: Codex,
         thread_id: ThreadId,
         session_source: SessionSource,
+        writer_lease: Option<Box<crate::thread_writer_lease::ThreadWriterLease>>,
     ) -> CodexResult<NewThread> {
         let event = codex.next_event().await?;
         let session_configured = match event {
@@ -1650,6 +1766,25 @@ impl ThreadManagerState {
             }
         };
 
+        let writer_lease = if let Some(rollout_path) = session_configured.rollout_path.as_deref() {
+            match writer_lease {
+                Some(writer_lease) => Some(writer_lease),
+                None => match self.acquire_thread_writer_lease(thread_id, rollout_path) {
+                    Ok(writer_lease) => Some(writer_lease),
+                    Err(error) => {
+                        if let Err(shutdown_error) = codex.shutdown_and_wait().await {
+                            warn!(
+                                "failed to shut down thread {thread_id} after writer lease failure: {shutdown_error}"
+                            );
+                        }
+                        return Err(error);
+                    }
+                },
+            }
+        } else {
+            None
+        };
+
         {
             let mut threads = self.threads.write().await;
             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
@@ -1658,6 +1793,7 @@ impl ThreadManagerState {
                     session_configured.clone(),
                     session_configured.rollout_path.clone(),
                     session_source,
+                    writer_lease,
                 ));
                 e.insert(thread.clone());
                 return Ok(NewThread {
@@ -1674,6 +1810,20 @@ impl ThreadManagerState {
         Err(CodexErr::InvalidRequest(format!(
             "thread {thread_id} is already running"
         )))
+    }
+
+    fn acquire_thread_writer_lease(
+        &self,
+        thread_id: ThreadId,
+        rollout_path: &Path,
+    ) -> CodexResult<Box<crate::thread_writer_lease::ThreadWriterLease>> {
+        crate::thread_writer_lease::ThreadWriterLease::acquire(rollout_path, thread_id)
+            .map(Box::new)
+            .map_err(|error| {
+                CodexErr::InvalidRequest(format!(
+                    "thread {thread_id} cannot be resumed because {error}. To explore it in parallel, run `codex-lab fork {thread_id}` (or `codex fork {thread_id}` in the stock CLI) instead"
+                ))
+            })
     }
 
     pub(crate) fn notify_thread_created(&self, thread_id: ThreadId) {

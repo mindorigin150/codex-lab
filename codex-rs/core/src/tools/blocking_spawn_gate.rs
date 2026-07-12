@@ -70,6 +70,7 @@ pub(super) fn is_collaboration_call(call: &ToolCall, namespace: Option<&str>) ->
         && matches!(
             call.tool_name.name.as_str(),
             "spawn_agent"
+                | "spawn_agents"
                 | "send_message"
                 | "followup_task"
                 | "wait_agent"
@@ -79,16 +80,33 @@ pub(super) fn is_collaboration_call(call: &ToolCall, namespace: Option<&str>) ->
 }
 
 pub(super) fn is_blocking_spawn(call: &ToolCall, namespace: Option<&str>) -> bool {
-    if !is_collaboration_call(call, namespace) || call.tool_name.name != "spawn_agent" {
+    if !is_collaboration_call(call, namespace)
+        || !matches!(call.tool_name.name.as_str(), "spawn_agent" | "spawn_agents")
+    {
         return false;
     }
     let ToolPayload::Function { arguments } = &call.payload else {
         return false;
     };
-    serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .and_then(|arguments| arguments.get("agent_type")?.as_str().map(str::to_owned))
-        .is_some_and(|role| matches!(role.trim(), "explorer" | "reviewer"))
+    let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return false;
+    };
+    if call.tool_name.name == "spawn_agent" {
+        return arguments
+            .get("agent_type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|role| matches!(role.trim(), "explorer" | "reviewer"));
+    }
+    arguments
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tasks| {
+            tasks.iter().any(|task| {
+                task.get("agent_type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|role| matches!(role.trim(), "explorer" | "reviewer"))
+            })
+        })
 }
 
 #[cfg(test)]
@@ -122,6 +140,22 @@ mod tests {
             },
             None
         ));
+
+        let batch = |roles: &[&str]| ToolCall {
+            tool_name: codex_tools::ToolName::plain("spawn_agents"),
+            call_id: "call-batch".to_string(),
+            payload: ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "tasks": roles.iter().map(|role| serde_json::json!({
+                        "agent_type": role
+                    })).collect::<Vec<_>>()
+                })
+                .to_string(),
+            },
+        };
+        assert!(is_collaboration_call(&batch(&["worker", "explorer"]), None));
+        assert!(is_blocking_spawn(&batch(&["worker", "explorer"]), None));
+        assert!(!is_blocking_spawn(&batch(&["worker", "default"]), None));
     }
 
     #[tokio::test]

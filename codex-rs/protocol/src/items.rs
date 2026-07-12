@@ -292,6 +292,22 @@ pub struct SubAgentActivityItem {
     pub kind: SubAgentActivityKind,
     pub agent_thread_id: ThreadId,
     pub agent_path: AgentPath,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub operation: Option<SubAgentActivityOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SubAgentActivityOperation {
+    Spawn,
+    Followup,
+    SendMessage,
+    Interrupt,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
@@ -684,5 +700,20 @@ mod tests {
                 hook_run_id: "hook-run-1".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn sub_agent_activity_deserializes_without_operation_receipt_fields() {
+        let legacy = serde_json::json!({
+            "id": "call-1",
+            "kind": "started",
+            "agent_thread_id": ThreadId::new(),
+            "agent_path": "/root/explorer"
+        });
+
+        let activity: SubAgentActivityItem =
+            serde_json::from_value(legacy).expect("legacy activity should deserialize");
+        assert_eq!(activity.operation, None);
+        assert_eq!(activity.generation, None);
     }
 }

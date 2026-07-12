@@ -52,6 +52,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
@@ -164,6 +165,7 @@ pub struct CodexThread {
     pub(crate) session_source: SessionSource,
     session_configured: SessionConfiguredEvent,
     rollout_path: Option<PathBuf>,
+    writer_lease: StdMutex<Option<Box<crate::thread_writer_lease::ThreadWriterLease>>>,
     out_of_band_elicitations: Mutex<OutOfBandElicitations>,
 }
 
@@ -189,12 +191,14 @@ impl CodexThread {
         session_configured: SessionConfiguredEvent,
         rollout_path: Option<PathBuf>,
         session_source: SessionSource,
+        writer_lease: Option<Box<crate::thread_writer_lease::ThreadWriterLease>>,
     ) -> Self {
         Self {
             codex,
             session_source,
             session_configured,
             rollout_path,
+            writer_lease: StdMutex::new(writer_lease),
             out_of_band_elicitations: Mutex::new(OutOfBandElicitations::default()),
         }
     }
@@ -209,12 +213,24 @@ impl CodexThread {
     }
 
     pub async fn shutdown_and_wait(&self) -> CodexResult<()> {
-        self.codex.shutdown_and_wait().await
+        let result = self.codex.shutdown_and_wait().await;
+        if result.is_ok() {
+            self.release_writer_lease();
+        }
+        result
     }
 
     /// Wait until the underlying session loop has terminated.
     pub async fn wait_until_terminated(&self) {
         self.codex.session_loop_termination.clone().await;
+        self.release_writer_lease();
+    }
+
+    fn release_writer_lease(&self) {
+        self.writer_lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 
     pub(crate) async fn emit_thread_resume_lifecycle(&self) {

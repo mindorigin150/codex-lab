@@ -78,6 +78,11 @@ async fn handle_interrupt_agent(
             agent_thread_id: agent_id,
             agent_path: receiver_agent_path,
             kind: SubAgentActivityKind::Interrupted,
+            operation: Some(SubAgentActivityOperation::Interrupt),
+            generation: session
+                .services
+                .agent_control
+                .current_agent_generation(agent_id),
         },
     )
     .await;

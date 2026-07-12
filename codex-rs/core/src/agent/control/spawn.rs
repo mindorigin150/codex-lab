@@ -109,6 +109,7 @@ impl AgentControl {
             SpawnInitialInput::UserInput(initial_input),
             session_source,
             SpawnAgentOptions::default(),
+            None,
         ))
         .await?;
         Ok(spawned_agent.thread_id)
@@ -127,6 +128,7 @@ impl AgentControl {
             SpawnInitialInput::UserInput(initial_input),
             session_source,
             options,
+            None,
         ))
         .await
     }
@@ -144,6 +146,26 @@ impl AgentControl {
             SpawnInitialInput::InterAgentCommunication(communication, context),
             session_source,
             options,
+            None,
+        ))
+        .await
+    }
+
+    pub(crate) async fn spawn_agent_with_reserved_v2_residency(
+        &self,
+        config: Config,
+        communication: InterAgentCommunication,
+        context: AgentCommunicationContext,
+        session_source: Option<SessionSource>,
+        options: SpawnAgentOptions,
+        residency_slot: V2ResidencySlot,
+    ) -> CodexResult<LiveAgent> {
+        Box::pin(self.spawn_agent_internal(
+            config,
+            SpawnInitialInput::InterAgentCommunication(communication, context),
+            session_source,
+            options,
+            Some(residency_slot),
         ))
         .await
     }
@@ -234,6 +256,7 @@ impl AgentControl {
         initial_input: SpawnInitialInput,
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
+        reserved_v2_residency_slot: Option<V2ResidencySlot>,
     ) -> CodexResult<LiveAgent> {
         let state = self.upgrade()?;
         let multi_agent_version = state
@@ -254,11 +277,17 @@ impl AgentControl {
                 .as_ref()
                 .is_some_and(is_v2_resident_session_source);
         let residency_slot = if spawn_uses_v2_residency {
-            Some(
-                self.reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+            match reserved_v2_residency_slot {
+                Some(slot) => Some(slot),
+                None => Some(
+                    self.reserve_v2_residency_slot(
+                        &state, &config, /*protected_thread_id*/ None,
+                    )
                     .await?,
-            )
+                ),
+            }
         } else {
+            debug_assert!(reserved_v2_residency_slot.is_none());
             None
         };
         let reservation_max_threads = if spawn_uses_v2_residency {

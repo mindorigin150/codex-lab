@@ -3508,6 +3508,21 @@ fn cancelling_latest_generation_restores_previous_receipt() {
 }
 
 #[test]
+fn cancelling_generation_suppresses_exactly_one_late_completion() {
+    let control = AgentControl::default();
+    let parent_id = ThreadId::new();
+    let agent_id = ThreadId::new();
+
+    let generation = control.reserve_agent_generation(agent_id);
+    control.register_blocking_agent(parent_id, agent_id);
+    control.cleanup_rolled_back_agent(parent_id, agent_id, Some(generation));
+
+    assert!(control.blocking_agent_targets(parent_id).is_empty());
+    assert!(!control.should_deliver_completion(agent_id));
+    assert!(control.should_deliver_completion(agent_id));
+}
+
+#[test]
 fn blocking_barrier_failure_requires_user_acknowledgement_or_retry() {
     let control = AgentControl::default();
     let parent_id = ThreadId::new();
