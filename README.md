@@ -11,6 +11,58 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ## Quickstart
 
+### Installing Codex Lab (this fork)
+
+The official installers below install the stock `codex` command. To use the
+multi-agent and lifecycle changes in this repository, build and install the
+fork from source instead:
+
+```shell
+git clone https://github.com/mindorigin150/codex-lab.git
+cd codex-lab
+bash scripts/install/install-codex-lab.sh
+```
+
+The source build requires a working Rust toolchain with `cargo`. On Linux,
+read-only explorer and reviewer agents also require Bubblewrap:
+
+```shell
+# Debian/Ubuntu
+sudo apt-get update
+sudo apt-get install -y bubblewrap
+```
+
+Make sure the launcher directory is on `PATH`, then validate and start the lab
+build:
+
+```shell
+export PATH="$HOME/.local/bin:$PATH"
+codex-lab --version
+codex-lab doctor
+codex-lab
+```
+
+The installer keeps the stock `codex` command untouched. It installs versioned
+binaries under `~/.local/lib/codex-lab`, creates the
+`~/.local/bin/codex-lab` launcher, and uses an isolated `~/.codex-lab`
+configuration home. Recorded sessions and the SQLite conversation index are
+shared with the default `~/.codex` home, so `codex-lab resume --all` can find
+conversations created by either installation. Authentication and other lab
+configuration may still need to be set up separately on first use.
+
+To update an existing source installation, update the checkout and rerun the
+same installer:
+
+```shell
+cd /path/to/codex-lab
+git pull --rebase
+bash scripts/install/install-codex-lab.sh
+```
+
+The installer builds a new versioned release and atomically switches the
+`codex-lab` launcher to it. If upstream changes conflict with this fork, resolve
+the source conflicts before rerunning the installer.
+
 ### Installing and running Codex CLI
 
 Run the following on Mac or Linux to install Codex CLI:
