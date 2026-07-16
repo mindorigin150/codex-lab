@@ -18,7 +18,7 @@ pub(crate) const MAX_RASTER_PIXELS: u64 = 32 * 1024 * 1024;
 const QUICKJS_MEMORY_LIMIT: usize = 128 * 1024 * 1024;
 const QUICKJS_STACK_LIMIT: usize = 1024 * 1024;
 const FORMULA_FONT_CELL_HEIGHT_RATIO: f32 = 0.875;
-const FORMULA_STROKE_WIDTH: u16 = 24;
+const FORMULA_STROKE_WIDTH: u16 = 32;
 pub(crate) const FORMULA_RENDER_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_formula_with_medium_weight() {
+    fn renders_formula_with_strong_weight() {
         let renderer = FormulaRenderer::new().unwrap();
         let target = FormulaRasterTarget {
             columns: 12,

@@ -27,7 +27,7 @@ use crate::formula_render::FormulaRenderer;
 const MAX_FORMULAS_PER_MESSAGE: usize = 128;
 const FORMULA_JOB_TIMEOUT: Duration = Duration::from_secs(5);
 const MEMORY_CACHE_BYTES: usize = 64 * 1024 * 1024;
-const CACHE_MAGIC: &[u8; 4] = b"CFM5";
+const CACHE_MAGIC: &[u8; 4] = b"CFM6";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaRenderKey {
@@ -377,7 +377,7 @@ fn memory_cache_put(key: [u8; 32], layout: FormulaLayoutRaster) {
 fn formula_cache_key(source: &FormulaSource, key: FormulaRenderKey) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(
-        b"codex-tui-math-v5-rquickjs-0.11-resvg-0.47-transparent-cell-font-centered-stroke-24",
+        b"codex-tui-math-v6-rquickjs-0.11-resvg-0.47-transparent-cell-font-centered-stroke-32",
     );
     hasher.update([match source.kind {
         FormulaKind::Inline => 0,
@@ -403,7 +403,7 @@ fn formula_cache_path(source: &FormulaSource, key: FormulaRenderKey) -> Option<P
         home.as_path()
             .join("cache")
             .join("tui-math")
-            .join("v5")
+            .join("v6")
             .join(format!("{digest}.bin")),
     )
 }
