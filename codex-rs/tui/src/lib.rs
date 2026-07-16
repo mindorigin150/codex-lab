@@ -134,6 +134,9 @@ mod keymap_setup;
 mod line_truncation;
 pub(crate) mod live_wrap;
 pub use live_wrap::RowBuilder;
+mod formula_parser;
+mod formula_render;
+mod formula_runtime;
 mod local_chatgpt_auth;
 mod managed_new_thread_defaults;
 mod markdown;
@@ -172,6 +175,7 @@ mod status_indicator_widget;
 mod streaming;
 mod style;
 mod terminal_hyperlinks;
+mod terminal_images;
 mod terminal_palette;
 mod terminal_probe;
 mod terminal_title;
@@ -1271,6 +1275,7 @@ async fn run_ratatui_app(
     let mut tui = Tui::new(
         initialized_terminal.terminal,
         initialized_terminal.enhanced_keys_supported,
+        initialized_terminal.image_capabilities,
         initialized_terminal.stderr_guard,
     );
     let mut terminal_restore_guard = TerminalRestoreGuard::new();

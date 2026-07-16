@@ -496,8 +496,27 @@ struct SessionSummary {
 
 #[derive(Debug, Default)]
 struct InitialHistoryReplayBuffer {
-    retained_lines: VecDeque<crate::terminal_hyperlinks::HyperlinkLine>,
+    retained_lines: VecDeque<crate::history_cell::RichHistoryLine>,
     render_from_transcript_tail: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FormulaRenderEnvironment {
+    width: u16,
+    cell_pixel_width: u16,
+    cell_pixel_height: u16,
+    foreground_rgb: [u8; 3],
+}
+
+impl From<crate::formula_runtime::FormulaRenderKey> for FormulaRenderEnvironment {
+    fn from(key: crate::formula_runtime::FormulaRenderKey) -> Self {
+        Self {
+            width: key.width,
+            cell_pixel_width: key.cell_pixel_width,
+            cell_pixel_height: key.cell_pixel_height,
+            foreground_rgb: key.foreground_rgb,
+        }
+    }
 }
 
 pub(crate) struct App {
@@ -522,9 +541,10 @@ pub(crate) struct App {
 
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
-    pub(crate) deferred_history_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
+    pub(crate) deferred_history_lines: Vec<crate::history_cell::RichHistoryLine>,
     has_emitted_history_lines: bool,
     transcript_reflow: TranscriptReflowState,
+    last_formula_render_environment: Option<Option<FormulaRenderEnvironment>>,
     initial_history_replay_buffer: Option<InitialHistoryReplayBuffer>,
 
     pub(crate) enhanced_keys_supported: bool,
@@ -1036,6 +1056,7 @@ See the Codex keymap documentation for supported actions and examples."
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
             transcript_reflow: TranscriptReflowState::default(),
+            last_formula_render_environment: None,
             initial_history_replay_buffer: None,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
@@ -1268,7 +1289,7 @@ See the Codex keymap documentation for supported actions and examples."
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
-        if matches!(event, TuiEvent::Draw | TuiEvent::Resize) {
+        if matches!(&event, TuiEvent::Draw | TuiEvent::Resize) {
             self.handle_draw_pre_render(tui)?;
         }
 

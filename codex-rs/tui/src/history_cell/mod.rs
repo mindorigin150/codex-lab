@@ -34,6 +34,42 @@ use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::mark_buffer_hyperlinks;
+
+#[derive(Clone, Debug)]
+pub(crate) struct FormulaPlacement {
+    pub(crate) formula_index: usize,
+    pub(crate) column: u16,
+    pub(crate) columns: u16,
+    pub(crate) rows: u16,
+    pub(crate) raster: crate::formula_render::FormulaRaster,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RichHistoryLine {
+    pub(crate) text: HyperlinkLine,
+    pub(crate) formulas: Vec<FormulaPlacement>,
+}
+
+impl RichHistoryLine {
+    pub(crate) fn plain(text: HyperlinkLine) -> Self {
+        Self {
+            text,
+            formulas: Vec::new(),
+        }
+    }
+}
+
+impl From<HyperlinkLine> for RichHistoryLine {
+    fn from(text: HyperlinkLine) -> Self {
+        Self::plain(text)
+    }
+}
+
+impl From<Line<'static>> for RichHistoryLine {
+    fn from(line: Line<'static>) -> Self {
+        Self::plain(HyperlinkLine::new(line))
+    }
+}
 use crate::terminal_hyperlinks::plain_hyperlink_lines;
 use crate::terminal_hyperlinks::prefix_hyperlink_lines;
 use crate::terminal_hyperlinks::visible_lines;
@@ -198,21 +234,31 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
         plain_hyperlink_lines(self.display_lines(width))
     }
 
+    fn display_rich_lines(&self, width: u16) -> Vec<RichHistoryLine> {
+        self.display_hyperlink_lines(width)
+            .into_iter()
+            .map(RichHistoryLine::plain)
+            .collect()
+    }
+
+    fn display_rich_lines_for_mode(
+        &self,
+        width: u16,
+        mode: HistoryRenderMode,
+    ) -> Vec<RichHistoryLine> {
+        match mode {
+            HistoryRenderMode::Rich => self.display_rich_lines(width),
+            HistoryRenderMode::Raw => plain_hyperlink_lines(self.raw_lines())
+                .into_iter()
+                .map(RichHistoryLine::plain)
+                .collect(),
+        }
+    }
+
     fn display_lines_for_mode(&self, width: u16, mode: HistoryRenderMode) -> Vec<Line<'static>> {
         match mode {
             HistoryRenderMode::Rich => visible_lines(self.display_hyperlink_lines(width)),
             HistoryRenderMode::Raw => self.raw_lines(),
-        }
-    }
-
-    fn display_hyperlink_lines_for_mode(
-        &self,
-        width: u16,
-        mode: HistoryRenderMode,
-    ) -> Vec<HyperlinkLine> {
-        match mode {
-            HistoryRenderMode::Rich => self.display_hyperlink_lines(width),
-            HistoryRenderMode::Raw => plain_hyperlink_lines(self.raw_lines()),
         }
     }
 
@@ -251,6 +297,13 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// delegate to `display_hyperlink_lines`.
     fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         plain_hyperlink_lines(self.transcript_lines(width))
+    }
+
+    fn transcript_rich_lines(&self, width: u16) -> Vec<RichHistoryLine> {
+        self.transcript_hyperlink_lines(width)
+            .into_iter()
+            .map(RichHistoryLine::plain)
+            .collect()
     }
 
     /// Returns the number of viewport rows for the transcript overlay.

@@ -686,6 +686,11 @@ pub(crate) enum AppEvent {
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
     },
 
+    /// A source-backed assistant cell finished its background MathJax barrier.
+    FormulaRenderReady {
+        cell_id: u64,
+    },
+
     /// Replace the contiguous run of streaming `ProposedPlanStreamCell`s at the
     /// end of the transcript with a single source-backed `ProposedPlanCell`.
     ///

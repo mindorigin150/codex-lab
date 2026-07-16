@@ -443,7 +443,18 @@ pub(crate) struct TranscriptOverlay {
     highlight_cell: Option<usize>,
     /// Cache key for the render-only live tail appended after committed cells.
     live_tail_key: Option<LiveTailKey>,
+    formula_placements: Vec<OverlayFormulaPlacement>,
     is_done: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OverlayFormulaPlacement {
+    pub(crate) column: u16,
+    pub(crate) row: u16,
+    pub(crate) columns: u16,
+    pub(crate) rows: u16,
+    pub(crate) crop: crate::terminal_images::SourceCrop,
+    pub(crate) raster: crate::formula_render::FormulaRaster,
 }
 
 /// Cache key for the active-cell "live tail" appended to the transcript overlay.
@@ -477,6 +488,7 @@ impl TranscriptOverlay {
             cells: transcript_cells,
             highlight_cell: None,
             live_tail_key: None,
+            formula_placements: Vec::new(),
             is_done: false,
         }
     }
@@ -775,7 +787,61 @@ impl TranscriptOverlay {
         let top = Rect::new(area.x, area.y, area.width, top_h);
         let bottom = Rect::new(area.x, area.y + top_h, area.width, 3);
         self.view.render(top, buf);
+        self.formula_placements = self.visible_formula_placements(top);
         self.render_hints(bottom, buf);
+    }
+
+    pub(crate) fn formula_placements(&self) -> &[OverlayFormulaPlacement] {
+        &self.formula_placements
+    }
+
+    fn visible_formula_placements(&self, area: Rect) -> Vec<OverlayFormulaPlacement> {
+        let content = self.view.content_area(area);
+        let visible_start = self.view.scroll_offset;
+        let visible_end = visible_start + usize::from(content.height);
+        let mut content_row = 0usize;
+        let mut placements = Vec::new();
+
+        for (cell_index, cell) in self.cells.iter().enumerate() {
+            if cell_index > 0 && !cell.is_stream_continuation() {
+                content_row += 1;
+            }
+            let lines = cell.transcript_rich_lines(content.width);
+            for (line_index, line) in lines.iter().enumerate() {
+                let formula_row = content_row + line_index;
+                for formula in &line.formulas {
+                    let formula_end = formula_row + usize::from(formula.rows);
+                    let clipped_start = formula_row.max(visible_start);
+                    let clipped_end = formula_end.min(visible_end);
+                    if clipped_start >= clipped_end {
+                        continue;
+                    }
+                    let hidden_top = clipped_start - formula_row;
+                    let visible_rows = clipped_end - clipped_start;
+                    let formula_rows = u32::from(formula.rows);
+                    let crop_y = formula.raster.pixel_height * hidden_top as u32 / formula_rows;
+                    let crop_end = formula.raster.pixel_height * (hidden_top + visible_rows) as u32
+                        / formula_rows;
+                    placements.push(OverlayFormulaPlacement {
+                        column: content.x.saturating_add(formula.column),
+                        row: content
+                            .y
+                            .saturating_add((clipped_start - visible_start) as u16),
+                        columns: formula.columns,
+                        rows: visible_rows as u16,
+                        crop: crate::terminal_images::SourceCrop {
+                            x: 0,
+                            y: crop_y,
+                            width: formula.raster.pixel_width,
+                            height: crop_end - crop_y,
+                        },
+                        raster: formula.raster.clone(),
+                    });
+                }
+            }
+            content_row += lines.len();
+        }
+        placements
     }
 }
 
@@ -962,6 +1028,11 @@ mod tests {
         lines: Vec<Line<'static>>,
     }
 
+    #[derive(Debug)]
+    struct FormulaTestCell {
+        raster: crate::formula_render::FormulaRaster,
+    }
+
     impl crate::history_cell::HistoryCell for TestCell {
         fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
             self.lines.clone()
@@ -973,6 +1044,35 @@ mod tests {
 
         fn transcript_lines(&self, _width: u16) -> Vec<Line<'static>> {
             self.lines.clone()
+        }
+    }
+
+    impl crate::history_cell::HistoryCell for FormulaTestCell {
+        fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+            vec![Line::default(); 5]
+        }
+
+        fn raw_lines(&self) -> Vec<Line<'static>> {
+            vec![Line::from("$$x$$")]
+        }
+
+        fn transcript_rich_lines(&self, _width: u16) -> Vec<crate::history_cell::RichHistoryLine> {
+            let mut lines = vec![
+                crate::history_cell::RichHistoryLine::plain(
+                    crate::terminal_hyperlinks::HyperlinkLine::new(Line::default()),
+                );
+                5
+            ];
+            lines[0]
+                .formulas
+                .push(crate::history_cell::FormulaPlacement {
+                    formula_index: 0,
+                    column: 2,
+                    columns: 7,
+                    rows: 5,
+                    raster: self.raster.clone(),
+                });
+            lines
         }
     }
 
@@ -991,6 +1091,33 @@ mod tests {
 
     fn transcript_overlay(cells: Vec<Arc<dyn HistoryCell>>) -> TranscriptOverlay {
         TranscriptOverlay::new(cells, default_pager_keymap())
+    }
+
+    #[test]
+    fn formula_placement_crops_partially_visible_block_by_source_pixels() {
+        let raster = crate::formula_render::FormulaRaster {
+            png: Arc::<[u8]>::from([]),
+            pixel_width: 70,
+            pixel_height: 11,
+        };
+        let mut overlay = transcript_overlay(vec![Arc::new(FormulaTestCell { raster })]);
+        overlay.view.scroll_offset = 2;
+
+        let placements = overlay.visible_formula_placements(Rect::new(4, 7, 20, 5));
+
+        assert_eq!(placements.len(), 1);
+        let placement = &placements[0];
+        assert_eq!((placement.column, placement.row), (6, 8));
+        assert_eq!((placement.columns, placement.rows), (7, 3));
+        assert_eq!(
+            placement.crop,
+            crate::terminal_images::SourceCrop {
+                x: 0,
+                y: 4,
+                width: 70,
+                height: 7,
+            }
+        );
     }
 
     fn static_overlay(lines: Vec<Line<'static>>, title: &str) -> StaticOverlay {

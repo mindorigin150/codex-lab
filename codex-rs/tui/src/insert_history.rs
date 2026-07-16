@@ -7,6 +7,8 @@ use std::fmt;
 use std::io;
 use std::io::Write;
 
+use crate::history_cell::FormulaPlacement;
+use crate::history_cell::RichHistoryLine;
 use crate::render::line_utils::line_to_static;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::decorate_spans;
@@ -110,6 +112,24 @@ pub(crate) fn insert_history_hyperlink_lines_with_mode_and_wrap_policy<B>(
 where
     B: Backend + Write,
 {
+    insert_history_rich_lines_with_mode_and_wrap_policy(
+        terminal,
+        lines.into_iter().map(RichHistoryLine::plain).collect(),
+        mode,
+        wrap_policy,
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn insert_history_rich_lines_with_mode_and_wrap_policy<B>(
+    terminal: &mut crate::custom_terminal::Terminal<B>,
+    lines: Vec<RichHistoryLine>,
+    mode: InsertHistoryMode,
+    wrap_policy: HistoryLineWrapPolicy,
+) -> io::Result<Vec<u32>>
+where
+    B: Backend + Write,
+{
     let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
 
     let mut area = terminal.viewport_area;
@@ -134,31 +154,42 @@ where
     for line in &lines {
         let line_wrapped = match wrap_policy {
             HistoryLineWrapPolicy::Terminal => vec![line.clone()],
+            HistoryLineWrapPolicy::PreWrap if !line.formulas.is_empty() => vec![line.clone()],
             HistoryLineWrapPolicy::PreWrap
-                if line_contains_url_like(&line.line)
-                    && !line_has_mixed_url_and_non_url_tokens(&line.line) =>
+                if line_contains_url_like(&line.text.line)
+                    && !line_has_mixed_url_and_non_url_tokens(&line.text.line) =>
             {
                 vec![line.clone()]
             }
             HistoryLineWrapPolicy::PreWrap => remap_wrapped_line(
-                line,
+                &line.text,
                 adaptive_wrap_line(
-                    &line.line,
+                    &line.text.line,
                     RtOptions::new(wrap_width)
-                        .subsequent_indent(leading_whitespace_prefix(&line.line)),
+                        .subsequent_indent(leading_whitespace_prefix(&line.text.line)),
                 )
                 .into_iter()
                 .map(|line| line_to_static(&line))
                 .collect(),
-            ),
+            )
+            .into_iter()
+            .map(RichHistoryLine::plain)
+            .collect(),
         };
         wrapped_rows += line_wrapped
             .iter()
-            .map(|wrapped_line| wrapped_line.width().max(1).div_ceil(wrap_width))
+            .map(|wrapped_line| {
+                if wrapped_line.formulas.is_empty() {
+                    wrapped_line.text.width().max(1).div_ceil(wrap_width)
+                } else {
+                    1
+                }
+            })
             .sum::<usize>();
         wrapped.extend(line_wrapped);
     }
     let wrapped_lines = wrapped_rows as u16;
+    let mut image_ids = Vec::new();
     match mode {
         InsertHistoryMode::ZellijRaw => {
             // The existing viewport is immediately replaced in the same draw pass. Clear it
@@ -170,7 +201,7 @@ where
                 if index > 0 {
                     queue!(writer, Print("\r\n"))?;
                 }
-                write_history_line(writer, line, wrap_width)?;
+                write_history_line(writer, &line.text, wrap_width)?;
             }
 
             // Writing raw source text through the terminal preserves its soft-wrap metadata.
@@ -192,7 +223,7 @@ where
         }
         InsertHistoryMode::Standard => {
             let writer = terminal.backend_mut();
-            let cursor_top = if area.bottom() < screen_size.height {
+            if area.bottom() < screen_size.height {
                 // If the viewport is not at the bottom of the screen, scroll it down to make room.
                 // Don't scroll it past the bottom of the screen.
                 let scroll_amount = wrapped_lines.min(screen_size.height - area.bottom());
@@ -205,13 +236,10 @@ where
                 }
                 queue!(writer, ResetScrollRegion)?;
 
-                let cursor_top = area.top().saturating_sub(1);
                 area.y += scroll_amount;
                 should_update_area = true;
-                cursor_top
-            } else {
-                area.top().saturating_sub(1)
-            };
+            }
+            let cursor_top = area.top().saturating_sub(1);
 
             // Limit the scroll region to the lines from the top of the screen to the
             // top of the viewport. With this in place, when we add lines inside this
@@ -235,9 +263,36 @@ where
             // fetch/restore the cursor position. insert_history_lines should be cursor-position-neutral :)
             queue!(writer, MoveTo(/*x*/ 0, cursor_top))?;
 
+            let mut pending_formulas: Vec<(FormulaPlacement, u16)> = Vec::new();
             for line in &wrapped {
                 queue!(writer, Print("\r\n"))?;
-                write_history_line(writer, line, wrap_width)?;
+                write_history_line(writer, &line.text, wrap_width)?;
+
+                for (_, remaining) in &mut pending_formulas {
+                    *remaining = remaining.saturating_sub(1);
+                }
+                pending_formulas.extend(line.formulas.iter().cloned().map(|placement| {
+                    let remaining = placement.rows.saturating_sub(1);
+                    (placement, remaining)
+                }));
+                let mut index = 0;
+                while index < pending_formulas.len() {
+                    if pending_formulas[index].1 == 0 {
+                        let (placement, _) = pending_formulas.remove(index);
+                        let visible_rows = placement.rows.min(area.top());
+                        if visible_rows > 0 {
+                            let target_y = cursor_top + 1 - visible_rows;
+                            image_ids.push(write_formula_image(
+                                writer,
+                                &placement,
+                                target_y,
+                                visible_rows,
+                            )?);
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
             }
 
             queue!(writer, ResetScrollRegion)?;
@@ -252,7 +307,42 @@ where
         terminal.note_history_rows_inserted(wrapped_lines);
     }
 
-    Ok(())
+    Ok(image_ids)
+}
+
+fn write_formula_image<W: Write>(
+    writer: &mut W,
+    placement: &FormulaPlacement,
+    target_y: u16,
+    visible_rows: u16,
+) -> io::Result<u32> {
+    let image_id = crate::terminal_images::next_image_id();
+    let hidden_top_rows = placement.rows - visible_rows;
+    let crop = (hidden_top_rows > 0).then(|| {
+        let crop_y =
+            placement.raster.pixel_height * u32::from(hidden_top_rows) / u32::from(placement.rows);
+        crate::terminal_images::SourceCrop {
+            x: 0,
+            y: crop_y,
+            width: placement.raster.pixel_width,
+            height: placement.raster.pixel_height - crop_y,
+        }
+    });
+    let command = crate::terminal_images::transmit_png(
+        &placement.raster.png,
+        placement.columns,
+        visible_rows,
+        image_id,
+        crop,
+    );
+    queue!(
+        writer,
+        SavePosition,
+        MoveTo(placement.column, target_y),
+        Print(command),
+        RestorePosition
+    )?;
+    Ok(image_id)
 }
 
 pub(crate) fn leading_whitespace_prefix(line: &Line<'_>) -> Line<'static> {
@@ -483,6 +573,105 @@ mod tests {
     use crate::test_backend::VT100Backend;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
+    use std::sync::Arc;
+
+    #[test]
+    fn rich_history_places_block_formula_before_it_scrolls() {
+        let width = 40;
+        let height = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        term.set_viewport_area(Rect::new(0, 0, width, 1));
+        let first = RichHistoryLine {
+            text: HyperlinkLine::new(Line::from("        ")),
+            formulas: vec![FormulaPlacement {
+                formula_index: 0,
+                column: 2,
+                columns: 6,
+                rows: 2,
+                raster: crate::formula_render::FormulaRaster {
+                    png: Arc::from(&b"png"[..]),
+                    pixel_width: 96,
+                    pixel_height: 64,
+                },
+            }],
+        };
+        let continuation = RichHistoryLine::plain(HyperlinkLine::new(Line::from("        ")));
+
+        let image_ids = insert_history_rich_lines_with_mode_and_wrap_policy(
+            &mut term,
+            vec![first, continuation],
+            InsertHistoryMode::Standard,
+            HistoryLineWrapPolicy::PreWrap,
+        )
+        .expect("insert rich history");
+
+        assert_eq!(image_ids.len(), 1);
+        let output = String::from_utf8_lossy(&term.backend().output);
+        assert!(output.contains("\x1b[1;3H\x1b_Ga=T"));
+        assert!(!output.contains("65536"));
+    }
+
+    #[test]
+    fn inline_formula_uses_viewport_position_after_history_replay_shift() {
+        let width = 40;
+        let height = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        term.set_viewport_area(Rect::new(0, 0, width, 1));
+        let formula = RichHistoryLine {
+            text: HyperlinkLine::new(Line::from("        ")),
+            formulas: vec![FormulaPlacement {
+                formula_index: 0,
+                column: 2,
+                columns: 6,
+                rows: 1,
+                raster: crate::formula_render::FormulaRaster {
+                    png: Arc::from(&b"png"[..]),
+                    pixel_width: 96,
+                    pixel_height: 32,
+                },
+            }],
+        };
+
+        let image_ids = insert_history_rich_lines_with_mode_and_wrap_policy(
+            &mut term,
+            vec![
+                RichHistoryLine::plain(HyperlinkLine::new(Line::from("first"))),
+                RichHistoryLine::plain(HyperlinkLine::new(Line::from("second"))),
+                formula,
+            ],
+            InsertHistoryMode::Standard,
+            HistoryLineWrapPolicy::PreWrap,
+        )
+        .expect("insert rich history");
+
+        assert_eq!(image_ids.len(), 1);
+        let output = String::from_utf8_lossy(&term.backend().output);
+        assert!(output.contains("\x1b[3;3H\x1b_Ga=T"));
+    }
+
+    #[test]
+    fn tall_formula_is_cropped_to_available_history_rows() {
+        let placement = FormulaPlacement {
+            formula_index: 0,
+            column: 2,
+            columns: 6,
+            rows: 4,
+            raster: crate::formula_render::FormulaRaster {
+                png: Arc::from(&b"png"[..]),
+                pixel_width: 96,
+                pixel_height: 80,
+            },
+        };
+        let mut output = Vec::new();
+
+        write_formula_image(&mut output, &placement, 0, 2).expect("write formula image");
+
+        let output = String::from_utf8(output).expect("terminal output is UTF-8");
+        assert!(output.contains(",c=6,r=2,"));
+        assert!(output.contains(",x=0,y=40,w=96,h=40,"));
+    }
 
     #[test]
     fn writes_bold_then_regular_spans() {

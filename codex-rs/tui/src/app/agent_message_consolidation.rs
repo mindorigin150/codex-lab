@@ -52,8 +52,20 @@ impl App {
             tracing::debug!(
                 "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
             );
-            let consolidated: Arc<dyn HistoryCell> =
-                Arc::new(history_cell::AgentMarkdownCell::new(source, &cwd));
+            let consolidated = Arc::new(history_cell::AgentMarkdownCell::new(source, &cwd));
+            let formula_reflow_pending = if consolidated.has_formulas() {
+                let terminal_width = tui.terminal.size()?.width;
+                let width = self.chat_widget.history_wrap_width(terminal_width);
+                if let Some(key) = tui.formula_render_key(width) {
+                    consolidated.prepare_formulas(key, self.app_event_tx.clone())
+                } else {
+                    show_formula_capability_warning_once(self, tui);
+                    false
+                }
+            } else {
+                false
+            };
+            let consolidated: Arc<dyn HistoryCell> = consolidated;
             self.transcript_cells
                 .splice(start..end, std::iter::once(consolidated.clone()));
 
@@ -62,7 +74,9 @@ impl App {
                 tui.frame_requester().schedule_frame();
             }
 
-            self.finish_agent_message_consolidation(tui, scrollback_reflow)?;
+            if !formula_reflow_pending {
+                self.finish_agent_message_consolidation(tui, scrollback_reflow)?;
+            }
         } else {
             tracing::debug!(
                 "ConsolidateAgentMessage: no cells to consolidate(start={start}, end={end})",
@@ -89,4 +103,20 @@ impl App {
 
         Ok(())
     }
+}
+
+pub(super) fn show_formula_capability_warning_once(app: &mut App, tui: &mut tui::Tui) {
+    static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let warning: Arc<dyn HistoryCell> = Arc::new(history_cell::new_error_event(
+        "LaTeX image rendering is unavailable: VS Code Kitty graphics or CSI 16t cell-size probing did not respond. Formula source was preserved."
+            .to_string(),
+    ));
+    if let Some(Overlay::Transcript(transcript)) = &mut app.overlay {
+        transcript.insert_cell(warning.clone());
+        tui.frame_requester().schedule_frame();
+    }
+    app.transcript_cells.push(warning);
 }

@@ -183,6 +183,32 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
 }
 
 #[test]
+fn formula_render_environment_tracks_width_and_terminal_foreground() {
+    let light_key = crate::formula_runtime::FormulaRenderKey {
+        width: 80,
+        cell_pixel_width: 8,
+        cell_pixel_height: 16,
+        foreground_rgb: [230; 3],
+    };
+    let dark_key = crate::formula_runtime::FormulaRenderKey {
+        foreground_rgb: [20; 3],
+        ..light_key
+    };
+
+    assert_ne!(
+        FormulaRenderEnvironment::from(dark_key),
+        FormulaRenderEnvironment::from(light_key)
+    );
+    assert_ne!(
+        FormulaRenderEnvironment::from(crate::formula_runtime::FormulaRenderKey {
+            width: 60,
+            ..light_key
+        }),
+        FormulaRenderEnvironment::from(light_key)
+    );
+}
+
+#[test]
 fn bypass_hook_trust_startup_warning_snapshot() {
     let rendered = lines_to_single_string(
         &history_cell::new_warning_event(
@@ -4073,6 +4099,7 @@ async fn make_test_app() -> App {
         deferred_history_lines: Vec::new(),
         has_emitted_history_lines: false,
         transcript_reflow: TranscriptReflowState::default(),
+        last_formula_render_environment: None,
         initial_history_replay_buffer: None,
         enhanced_keys_supported: false,
         keymap: crate::keymap::RuntimeKeymap::defaults(),
@@ -4138,6 +4165,7 @@ async fn make_test_app_with_channels() -> (
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
             transcript_reflow: TranscriptReflowState::default(),
+            last_formula_render_environment: None,
             initial_history_replay_buffer: None,
             enhanced_keys_supported: false,
             keymap: crate::keymap::RuntimeKeymap::defaults(),
@@ -4423,8 +4451,9 @@ fn plain_line_cell(text: impl Into<String>) -> Arc<dyn HistoryCell> {
     Arc::new(PlainHistoryCell::new(vec![Line::from(text.into())])) as Arc<dyn HistoryCell>
 }
 
-fn rendered_line_text(line: &crate::terminal_hyperlinks::HyperlinkLine) -> String {
-    line.line
+fn rendered_line_text(line: &crate::history_cell::RichHistoryLine) -> String {
+    line.text
+        .line
         .spans
         .iter()
         .map(|span| span.content.as_ref())

@@ -365,6 +365,8 @@ portable-pty = "0.9.0"
 predicates = "3"
 pretty_assertions = "1.4.1"
 pulldown-cmark = "0.10"
+resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
+rquickjs = { version = "0.11.0", features = ["full"] }
 quick-xml = "0.41.0"
 rand = "0.9"
 ratatui = "0.29.0"

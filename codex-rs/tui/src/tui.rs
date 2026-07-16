@@ -9,18 +9,24 @@ use std::io::stdout;
 use std::panic;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crossterm::Command;
 use crossterm::SynchronizedUpdate;
+use crossterm::cursor::MoveTo;
+use crossterm::cursor::RestorePosition;
+use crossterm::cursor::SavePosition;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::DisableBracketedPaste;
 use crossterm::event::DisableFocusChange;
 use crossterm::event::EnableBracketedPaste;
 use crossterm::event::EnableFocusChange;
 use crossterm::event::KeyEvent;
+use crossterm::queue;
+use crossterm::style::Print;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 #[cfg(not(unix))]
@@ -72,6 +78,7 @@ pub type Terminal = CustomTerminal<CrosstermBackend<Stdout>>;
 pub(crate) struct InitializedTerminal {
     pub(crate) terminal: Terminal,
     pub(crate) enhanced_keys_supported: bool,
+    pub(crate) image_capabilities: crate::terminal_images::TerminalImageCapabilities,
     pub(crate) stderr_guard: terminal_stderr::TerminalStderrGuard,
 }
 
@@ -86,8 +93,31 @@ fn should_emit_notification(condition: NotificationCondition, terminal_focused: 
     }
 }
 
+fn overlay_formula_placements_match(
+    previous: &[crate::pager_overlay::OverlayFormulaPlacement],
+    next: &[crate::pager_overlay::OverlayFormulaPlacement],
+) -> bool {
+    previous.len() == next.len()
+        && previous.iter().zip(next).all(|(previous, next)| {
+            previous.column == next.column
+                && previous.row == next.row
+                && previous.columns == next.columns
+                && previous.rows == next.rows
+                && previous.crop == next.crop
+                && previous.raster.pixel_width == next.raster.pixel_width
+                && previous.raster.pixel_height == next.raster.pixel_height
+                && Arc::ptr_eq(&previous.raster.png, &next.raster.png)
+        })
+}
+
 impl Drop for Tui {
     fn drop(&mut self) {
+        if let Err(err) = self.clear_formula_overlay_images() {
+            tracing::debug!(error = %err, "failed to clear formula overlay images on TUI drop");
+        }
+        if let Err(err) = self.clear_formula_scrollback_images() {
+            tracing::debug!(error = %err, "failed to clear formula scrollback images on TUI drop");
+        }
         if let Err(err) = self.clear_ambient_pet_image() {
             tracing::debug!(error = %err, "failed to clear ambient pet image on TUI drop");
         }
@@ -97,8 +127,10 @@ impl Drop for Tui {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::sync::Arc;
 
     use super::clear_for_viewport_change;
+    use super::overlay_formula_placements_match;
     use super::should_emit_notification;
     use crate::custom_terminal::Terminal as CustomTerminal;
     use crate::test_backend::VT100Backend;
@@ -169,6 +201,36 @@ mod tests {
             !rows.iter().skip(1).any(|row| row.contains("stale")),
             "expected stale cells inside the new viewport to be cleared, rows: {rows:?}"
         );
+    }
+
+    #[test]
+    fn unchanged_overlay_formula_placement_reuses_transmission() {
+        let raster = crate::formula_render::FormulaRaster {
+            png: Arc::from(&b"png"[..]),
+            pixel_width: 20,
+            pixel_height: 10,
+        };
+        let placement = crate::pager_overlay::OverlayFormulaPlacement {
+            column: 2,
+            row: 3,
+            columns: 4,
+            rows: 1,
+            crop: crate::terminal_images::SourceCrop {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 10,
+            },
+            raster,
+        };
+
+        assert!(overlay_formula_placements_match(
+            std::slice::from_ref(&placement),
+            std::slice::from_ref(&placement)
+        ));
+        let mut moved = placement.clone();
+        moved.row += 1;
+        assert!(!overlay_formula_placements_match(&[placement], &[moved]));
     }
 }
 
@@ -390,7 +452,7 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
     let backend = CrosstermBackend::new(stdout());
 
     #[cfg(unix)]
-    let startup_probe = {
+    let mut startup_probe = {
         use crate::terminal_probe::StartupKeyboardEnhancementProbe;
 
         let started_at = std::time::Instant::now();
@@ -407,6 +469,8 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
                     cursor_position = probe.cursor_position.is_some(),
                     default_colors = probe.default_colors.is_some(),
                     keyboard_enhancement_supported = ?probe.keyboard_enhancement_supported,
+                    kitty_graphics = probe.kitty_graphics,
+                    cell_size_pixels = ?probe.cell_size_pixels,
                     "terminal startup probes completed"
                 );
                 probe
@@ -420,10 +484,38 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
                     cursor_position: None,
                     default_colors: None,
                     keyboard_enhancement_supported: None,
+                    kitty_graphics: false,
+                    cell_size_pixels: None,
                 }
             }
         }
     };
+
+    #[cfg(unix)]
+    if startup_probe.cell_size_pixels.is_none() {
+        match crate::terminal_probe::cell_size_pixels_from_window() {
+            Ok(Some(cell_size_pixels)) => {
+                startup_probe.cell_size_pixels = Some(cell_size_pixels);
+                tracing::info!(
+                    ?cell_size_pixels,
+                    "terminal cell size derived from PTY window geometry"
+                );
+            }
+            Ok(None) => {
+                tracing::info!("PTY window geometry did not include pixel dimensions");
+            }
+            Err(err) => {
+                tracing::warn!("failed to read PTY window geometry: {err}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    tracing::info!(
+        kitty_graphics = startup_probe.kitty_graphics,
+        cell_size_pixels = ?startup_probe.cell_size_pixels,
+        "terminal image capabilities resolved"
+    );
 
     #[cfg(unix)]
     crate::terminal_palette::set_default_colors_from_startup_probe(startup_probe.default_colors);
@@ -452,6 +544,15 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
     let enhanced_keys_supported =
         !keyboard_modes::keyboard_enhancement_disabled() && detect_keyboard_enhancement_supported();
 
+    #[cfg(unix)]
+    let image_capabilities = crate::terminal_images::TerminalImageCapabilities {
+        kitty_graphics: startup_probe.kitty_graphics,
+        cell_size_pixels: startup_probe.cell_size_pixels,
+    };
+
+    #[cfg(not(unix))]
+    let image_capabilities = crate::terminal_images::TerminalImageCapabilities::default();
+
     #[cfg(windows)]
     probe_windows_default_colors();
 
@@ -460,6 +561,7 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
     Ok(InitializedTerminal {
         terminal: tui,
         enhanced_keys_supported,
+        image_capabilities,
         stderr_guard,
     })
 }
@@ -530,6 +632,10 @@ pub struct Tui {
     event_broker: Arc<EventBroker>,
     pub(crate) terminal: Terminal,
     pending_history_lines: Vec<PendingHistoryLines>,
+    formula_scrollback_image_ids: Arc<Mutex<Vec<u32>>>,
+    formula_overlay_image_ids: Arc<Mutex<Vec<u32>>>,
+    formula_overlay_snapshot: Vec<crate::pager_overlay::OverlayFormulaPlacement>,
+    formula_graphics_reset_needed: bool,
     ambient_pet_image_state: crate::pets::PetImageRenderState,
     pet_picker_preview_image_state: crate::pets::PetImageRenderState,
     alt_saved_viewport: Option<ratatui::layout::Rect>,
@@ -540,6 +646,7 @@ pub struct Tui {
     // True when terminal/tab is focused; updated internally from crossterm events
     terminal_focused: Arc<AtomicBool>,
     enhanced_keys_supported: bool,
+    image_capabilities: crate::terminal_images::TerminalImageCapabilities,
     notification_backend: Option<DesktopNotificationBackend>,
     notification_condition: NotificationCondition,
     // Raw terminal-wrapped history needs a non-scroll-region insertion path in Zellij.
@@ -551,7 +658,7 @@ pub struct Tui {
 }
 
 struct PendingHistoryLines {
-    lines: Vec<HyperlinkLine>,
+    lines: Vec<crate::history_cell::RichHistoryLine>,
     wrap_policy: HistoryLineWrapPolicy,
 }
 
@@ -571,6 +678,7 @@ impl Tui {
     pub(crate) fn new(
         terminal: Terminal,
         enhanced_keys_supported: bool,
+        image_capabilities: crate::terminal_images::TerminalImageCapabilities,
         stderr_guard: terminal_stderr::TerminalStderrGuard,
     ) -> Self {
         let (draw_tx, _) = broadcast::channel(1);
@@ -587,6 +695,10 @@ impl Tui {
             event_broker: Arc::new(EventBroker::new()),
             terminal,
             pending_history_lines: vec![],
+            formula_scrollback_image_ids: Arc::new(Mutex::new(Vec::new())),
+            formula_overlay_image_ids: Arc::new(Mutex::new(Vec::new())),
+            formula_overlay_snapshot: Vec::new(),
+            formula_graphics_reset_needed: false,
             ambient_pet_image_state: crate::pets::PetImageRenderState::default(),
             pet_picker_preview_image_state: crate::pets::PetImageRenderState::default(),
             alt_saved_viewport: None,
@@ -595,6 +707,7 @@ impl Tui {
             alt_screen_active: Arc::new(AtomicBool::new(false)),
             terminal_focused: Arc::new(AtomicBool::new(true)),
             enhanced_keys_supported,
+            image_capabilities,
             notification_backend: Some(detect_backend(NotificationMethod::default())),
             notification_condition: NotificationCondition::default(),
             is_zellij,
@@ -619,6 +732,26 @@ impl Tui {
 
     pub fn frame_requester(&self) -> FrameRequester {
         self.frame_requester.clone()
+    }
+
+    pub(crate) fn formula_render_key(
+        &self,
+        width: u16,
+    ) -> Option<crate::formula_runtime::FormulaRenderKey> {
+        let (cell_pixel_width, cell_pixel_height) = self.image_capabilities.cell_size_pixels?;
+        let foreground_rgb = crate::terminal_palette::default_fg()?;
+        self.image_capabilities
+            .kitty_graphics
+            .then_some(crate::formula_runtime::FormulaRenderKey {
+                width,
+                cell_pixel_width,
+                cell_pixel_height,
+                foreground_rgb: [foreground_rgb.0, foreground_rgb.1, foreground_rgb.2],
+            })
+    }
+
+    pub(crate) fn take_formula_graphics_reset_needed(&mut self) -> bool {
+        std::mem::take(&mut self.formula_graphics_reset_needed)
     }
 
     pub fn enhanced_keys_supported(&self) -> bool {
@@ -721,6 +854,8 @@ impl Tui {
             self.terminal_focused.clone(),
             self.suspend_context.clone(),
             self.alt_screen_active.clone(),
+            self.formula_scrollback_image_ids.clone(),
+            self.formula_overlay_image_ids.clone(),
         );
         #[cfg(not(unix))]
         let stream = TuiEventStream::new(
@@ -789,6 +924,20 @@ impl Tui {
         lines: Vec<HyperlinkLine>,
         wrap_policy: HistoryLineWrapPolicy,
     ) {
+        self.insert_history_rich_lines_with_wrap_policy(
+            lines
+                .into_iter()
+                .map(crate::history_cell::RichHistoryLine::plain)
+                .collect(),
+            wrap_policy,
+        );
+    }
+
+    pub(crate) fn insert_history_rich_lines_with_wrap_policy(
+        &mut self,
+        lines: Vec<crate::history_cell::RichHistoryLine>,
+        wrap_policy: HistoryLineWrapPolicy,
+    ) {
         if lines.is_empty() {
             return;
         }
@@ -805,6 +954,91 @@ impl Tui {
 
     pub fn clear_pending_history_lines(&mut self) {
         self.pending_history_lines.clear();
+    }
+
+    pub(crate) fn clear_formula_scrollback_images(&mut self) -> Result<()> {
+        let mut image_ids = self
+            .formula_scrollback_image_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if image_ids.is_empty() {
+            return Ok(());
+        }
+        let writer = self.terminal.backend_mut();
+        for image_id in image_ids.drain(..) {
+            queue!(
+                writer,
+                Print(crate::terminal_images::delete_image(image_id))
+            )?;
+        }
+        std::io::Write::flush(writer)?;
+        Ok(())
+    }
+
+    pub(crate) fn clear_formula_overlay_images(&mut self) -> Result<()> {
+        self.formula_overlay_snapshot.clear();
+        let mut image_ids = self
+            .formula_overlay_image_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if image_ids.is_empty() {
+            return Ok(());
+        }
+        let writer = self.terminal.backend_mut();
+        for image_id in image_ids.drain(..) {
+            queue!(
+                writer,
+                Print(crate::terminal_images::delete_image(image_id))
+            )?;
+        }
+        std::io::Write::flush(writer)?;
+        Ok(())
+    }
+
+    pub(crate) fn render_overlay_formula_images(
+        &mut self,
+        placements: &[crate::pager_overlay::OverlayFormulaPlacement],
+    ) -> Result<()> {
+        let image_count = self
+            .formula_overlay_image_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        if image_count == placements.len()
+            && overlay_formula_placements_match(&self.formula_overlay_snapshot, placements)
+        {
+            return Ok(());
+        }
+        self.clear_formula_overlay_images()?;
+        if placements.is_empty() {
+            return Ok(());
+        }
+        let mut image_ids = self
+            .formula_overlay_image_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let writer = self.terminal.backend_mut();
+        for placement in placements {
+            let image_id = crate::terminal_images::next_image_id();
+            let command = crate::terminal_images::transmit_png(
+                &placement.raster.png,
+                placement.columns,
+                placement.rows,
+                image_id,
+                Some(placement.crop),
+            );
+            queue!(
+                writer,
+                SavePosition,
+                MoveTo(placement.column, placement.row),
+                Print(command),
+                RestorePosition
+            )?;
+            image_ids.push(image_id);
+        }
+        std::io::Write::flush(writer)?;
+        self.formula_overlay_snapshot = placements.to_vec();
+        Ok(())
     }
 
     /// Resize the inline viewport for the resize-reflow path.
@@ -854,6 +1088,7 @@ impl Tui {
     fn flush_pending_history_lines(
         terminal: &mut Terminal,
         pending_history_lines: &mut Vec<PendingHistoryLines>,
+        formula_scrollback_image_ids: &mut Vec<u32>,
         is_zellij: bool,
     ) -> Result<()> {
         if pending_history_lines.is_empty() {
@@ -866,12 +1101,14 @@ impl Tui {
             } else {
                 InsertHistoryMode::Standard
             };
-            crate::insert_history::insert_history_hyperlink_lines_with_mode_and_wrap_policy(
-                terminal,
-                batch.lines.clone(),
-                mode,
-                batch.wrap_policy,
-            )?;
+            let image_ids =
+                crate::insert_history::insert_history_rich_lines_with_mode_and_wrap_policy(
+                    terminal,
+                    batch.lines.clone(),
+                    mode,
+                    batch.wrap_policy,
+                )?;
+            formula_scrollback_image_ids.extend(image_ids);
         }
         pending_history_lines.clear();
         Ok(())
@@ -888,6 +1125,10 @@ impl Tui {
         let mut prepared_resume = self
             .suspend_context
             .prepare_resume_action(&mut self.alt_saved_viewport);
+        #[cfg(unix)]
+        let resumed = prepared_resume.is_some();
+        #[cfg(not(unix))]
+        let resumed = false;
 
         // Precompute any viewport updates that need a cursor-position query before entering
         // the synchronized update, to avoid racing with the event reader.
@@ -895,7 +1136,7 @@ impl Tui {
 
         ensure_virtual_terminal_processing()?;
 
-        stdout().sync_update(|_| {
+        let draw_result = stdout().sync_update(|_| {
             #[cfg(unix)]
             if let Some(prepared) = prepared_resume.take() {
                 prepared.apply(&mut self.terminal)?;
@@ -926,9 +1167,14 @@ impl Tui {
                 terminal.set_viewport_area(area);
             }
 
+            let mut formula_image_ids = self
+                .formula_scrollback_image_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Self::flush_pending_history_lines(
                 terminal,
                 &mut self.pending_history_lines,
+                &mut formula_image_ids,
                 self.is_zellij,
             )?;
 
@@ -949,7 +1195,12 @@ impl Tui {
             terminal.draw(|frame| {
                 draw_fn(frame);
             })
-        })?
+        })?;
+        if resumed {
+            self.formula_graphics_reset_needed = true;
+            self.frame_requester.schedule_frame();
+        }
+        draw_result
     }
 
     pub fn draw_ambient_pet_image(
@@ -1024,10 +1275,14 @@ impl Tui {
         let mut prepared_resume = self
             .suspend_context
             .prepare_resume_action(&mut self.alt_saved_viewport);
+        #[cfg(unix)]
+        let resumed = prepared_resume.is_some();
+        #[cfg(not(unix))]
+        let resumed = false;
 
         ensure_virtual_terminal_processing()?;
 
-        stdout().sync_update(|_| {
+        let draw_result = stdout().sync_update(|_| {
             #[cfg(unix)]
             if let Some(prepared) = prepared_resume.take() {
                 prepared.apply(&mut self.terminal)?;
@@ -1036,9 +1291,14 @@ impl Tui {
             let terminal = &mut self.terminal;
             let needs_full_repaint =
                 Self::update_inline_viewport_for_resize_reflow(terminal, height)?;
+            let mut formula_image_ids = self
+                .formula_scrollback_image_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Self::flush_pending_history_lines(
                 terminal,
                 &mut self.pending_history_lines,
+                &mut formula_image_ids,
                 self.is_zellij,
             )?;
 
@@ -1063,7 +1323,12 @@ impl Tui {
             terminal.draw(|frame| {
                 draw_fn(frame);
             })
-        })?
+        })?;
+        if resumed {
+            self.formula_graphics_reset_needed = true;
+            self.frame_requester.schedule_frame();
+        }
+        draw_result
     }
 
     fn pending_viewport_area(&mut self) -> Result<Option<Rect>> {

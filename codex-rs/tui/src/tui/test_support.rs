@@ -23,6 +23,7 @@ pub(crate) fn make_test_tui() -> io::Result<Tui> {
     Ok(Tui::new(
         terminal,
         /*enhanced_keys_supported*/ false,
+        crate::terminal_images::TerminalImageCapabilities::default(),
         stderr_guard,
     ))
 }

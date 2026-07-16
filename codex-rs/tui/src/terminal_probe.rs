@@ -26,6 +26,37 @@ pub(crate) struct DefaultColors {
     pub(crate) bg: (u8, u8, u8),
 }
 
+/// Derives one terminal cell's pixel dimensions from the kernel's PTY window geometry.
+///
+/// VS Code Remote propagates the terminal's total pixel dimensions through `TIOCGWINSZ`, even
+/// when the CSI 16t reply misses the startup probe deadline. This path does not consume terminal
+/// input and therefore remains safe before and after crossterm event polling starts.
+#[cfg(unix)]
+pub(crate) fn cell_size_pixels_from_window() -> std::io::Result<Option<(u16, u16)>> {
+    let window = crossterm::terminal::window_size()?;
+    Ok(cell_size_pixels_from_dimensions(
+        window.width,
+        window.height,
+        window.columns,
+        window.rows,
+    ))
+}
+
+#[cfg(unix)]
+fn cell_size_pixels_from_dimensions(
+    width: u16,
+    height: u16,
+    columns: u16,
+    rows: u16,
+) -> Option<(u16, u16)> {
+    if width == 0 || height == 0 || columns == 0 || rows == 0 {
+        return None;
+    }
+    let cell_width = (u32::from(width) + u32::from(columns) / 2) / u32::from(columns);
+    let cell_height = (u32::from(height) + u32::from(rows) / 2) / u32::from(rows);
+    Some((cell_width as u16, cell_height as u16))
+}
+
 #[cfg(unix)]
 #[cfg_attr(test, allow(dead_code))]
 mod imp {
@@ -37,6 +68,8 @@ mod imp {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::fd::FromRawFd;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use std::time::Instant;
 
@@ -49,6 +82,9 @@ mod imp {
         pub(crate) cursor_position: Option<Position>,
         pub(crate) default_colors: Option<DefaultColors>,
         pub(crate) keyboard_enhancement_supported: Option<bool>,
+        pub(crate) kitty_graphics: bool,
+        /// Terminal cell size in pixels, as `(width, height)`.
+        pub(crate) cell_size_pixels: Option<(u16, u16)>,
     }
 
     /// Whether the startup probe should query keyboard enhancement support.
@@ -56,6 +92,13 @@ mod imp {
     pub(crate) enum StartupKeyboardEnhancementProbe {
         Query,
         Skip,
+    }
+
+    static NEXT_KITTY_QUERY_ID: AtomicU32 = AtomicU32::new(0x434f_4400);
+    const KITTY_QUERY_RGBA: &str = "AAAAAA==";
+
+    fn graphics_and_cell_size_query(image_id: u32) -> String {
+        format!("\x1B_Ga=q,t=d,f=32,s=1,v=1,i={image_id};{KITTY_QUERY_RGBA}\x1B\\\x1B[16t")
     }
 
     /// Temporary terminal handle used while a probe owns terminal input.
@@ -252,15 +295,22 @@ mod imp {
         keyboard_probe: StartupKeyboardEnhancementProbe,
     ) -> io::Result<StartupProbe> {
         let mut tty = Tty::open()?;
+        let kitty_query_id = NEXT_KITTY_QUERY_ID.fetch_add(1, Ordering::Relaxed);
+        let graphics_query = graphics_and_cell_size_query(kitty_query_id);
         match keyboard_probe {
             StartupKeyboardEnhancementProbe::Query => {
-                tty.write_all(b"\x1B[6n\x1B]10;?\x1B\\\x1B]11;?\x1B\\\x1B[?u\x1B[c")?;
+                tty.write_all(
+                    format!("\x1B[6n\x1B]10;?\x1B\\\x1B]11;?\x1B\\\x1B[?u\x1B[c{graphics_query}")
+                        .as_bytes(),
+                )?;
             }
             StartupKeyboardEnhancementProbe::Skip => {
-                tty.write_all(b"\x1B[6n\x1B]10;?\x1B\\\x1B]11;?\x1B\\")?;
+                tty.write_all(
+                    format!("\x1B[6n\x1B]10;?\x1B\\\x1B]11;?\x1B\\{graphics_query}").as_bytes(),
+                )?;
             }
         }
-        read_startup_probe(&mut tty, timeout, keyboard_probe)
+        read_startup_probe(&mut tty, timeout, keyboard_probe, kitty_query_id)
     }
 
     /// Reads available terminal bytes until `parse` recognizes a probe response or time expires.
@@ -294,6 +344,7 @@ mod imp {
         tty: &mut Tty,
         timeout: Duration,
         keyboard_probe: StartupKeyboardEnhancementProbe,
+        kitty_query_id: u32,
     ) -> io::Result<StartupProbe> {
         let deadline = Instant::now() + timeout;
         let mut buffer = Vec::new();
@@ -301,6 +352,8 @@ mod imp {
             cursor_position: None,
             default_colors: None,
             keyboard_enhancement_supported: None,
+            kitty_graphics: false,
+            cell_size_pixels: None,
         };
         let mut saw_supported_keyboard = false;
         loop {
@@ -310,6 +363,7 @@ mod imp {
                 &mut saw_supported_keyboard,
                 &buffer,
                 keyboard_probe,
+                kitty_query_id,
             );
             if startup_probe_complete(&probe, keyboard_probe) {
                 return Ok(probe);
@@ -331,12 +385,19 @@ mod imp {
         saw_supported_keyboard: &mut bool,
         buffer: &[u8],
         keyboard_probe: StartupKeyboardEnhancementProbe,
+        kitty_query_id: u32,
     ) {
         if probe.cursor_position.is_none() {
             probe.cursor_position = parse_cursor_position(buffer);
         }
         if probe.default_colors.is_none() {
             probe.default_colors = parse_default_colors(buffer);
+        }
+        if !probe.kitty_graphics {
+            probe.kitty_graphics = parse_kitty_graphics_response(buffer, kitty_query_id);
+        }
+        if probe.cell_size_pixels.is_none() {
+            probe.cell_size_pixels = parse_cell_size_pixels(buffer);
         }
         if keyboard_probe == StartupKeyboardEnhancementProbe::Skip
             || probe.keyboard_enhancement_supported.is_some()
@@ -363,6 +424,8 @@ mod imp {
     ) -> bool {
         probe.cursor_position.is_some()
             && probe.default_colors.is_some()
+            && probe.kitty_graphics
+            && probe.cell_size_pixels.is_some()
             && (keyboard_probe == StartupKeyboardEnhancementProbe::Skip
                 || probe.keyboard_enhancement_supported.is_some())
     }
@@ -400,6 +463,40 @@ mod imp {
             let row = row.saturating_sub(1);
             let col = col.saturating_sub(1);
             return Some(Position { x: col, y: row });
+        }
+        None
+    }
+
+    fn parse_kitty_graphics_response(buffer: &[u8], query_id: u32) -> bool {
+        let prefix = format!("\x1B_Gi={query_id};");
+        find_all_subslices(buffer, prefix.as_bytes()).any(|start| {
+            let payload = &buffer[start + prefix.len()..];
+            payload
+                .windows(2)
+                .position(|window| window == b"\x1B\\")
+                .is_some_and(|end| &payload[..end] == b"OK")
+        })
+    }
+
+    fn parse_cell_size_pixels(buffer: &[u8]) -> Option<(u16, u16)> {
+        for start in find_all_subslices(buffer, b"\x1B[6;") {
+            let rest = &buffer[start + 4..];
+            let Some(end) = rest.iter().position(|byte| *byte == b't') else {
+                continue;
+            };
+            let Ok(payload) = std::str::from_utf8(&rest[..end]) else {
+                continue;
+            };
+            let Some((height, width)) = payload.split_once(';') else {
+                continue;
+            };
+            let Ok(height) = height.parse::<u16>() else {
+                continue;
+            };
+            let Ok(width) = width.parse::<u16>() else {
+                continue;
+            };
+            return Some((width, height));
         }
         None
     }
@@ -506,6 +603,14 @@ mod imp {
         }
 
         #[test]
+        fn graphics_query_transmits_one_rgba_pixel_and_requests_cell_size() {
+            assert_eq!(
+                graphics_and_cell_size_query(42),
+                "\x1B_Ga=q,t=d,f=32,s=1,v=1,i=42;AAAAAA==\x1B\\\x1B[16t"
+            );
+        }
+
+        #[test]
         fn parses_keyboard_enhancement_flags_and_pda_fallback() {
             assert_eq!(
                 parse_keyboard_enhancement_support(b"\x1B[?7u"),
@@ -535,13 +640,16 @@ mod imp {
                 cursor_position: None,
                 default_colors: None,
                 keyboard_enhancement_supported: None,
+                kitty_graphics: false,
+                cell_size_pixels: None,
             };
             let mut saw_supported_keyboard = false;
             update_startup_probe(
                 &mut probe,
                 &mut saw_supported_keyboard,
-                b"\x1B[20;10R\x1B]11;rgb:1111/1111/1111\x07\x1B[?64;1;2c\x1B]10;rgb:eeee/eeee/eeee\x1B\\\x1B[?7u",
+                b"\x1B[20;10R\x1B]11;rgb:1111/1111/1111\x07\x1B[?64;1;2c\x1B]10;rgb:eeee/eeee/eeee\x1B\\\x1B[?7u\x1B[6;20;10t\x1B_Gi=77;OK\x1B\\",
                 StartupKeyboardEnhancementProbe::Query,
+                77,
             );
 
             assert_eq!(
@@ -553,12 +661,58 @@ mod imp {
                         bg: (17, 17, 17),
                     }),
                     keyboard_enhancement_supported: Some(true),
+                    kitty_graphics: true,
+                    cell_size_pixels: Some((10, 20)),
                 }
             );
             assert!(startup_probe_complete(
                 &probe,
                 StartupKeyboardEnhancementProbe::Query
             ));
+        }
+
+        #[test]
+        fn parses_graphics_and_cell_size_amid_mixed_responses() {
+            let mut probe = StartupProbe {
+                cursor_position: None,
+                default_colors: None,
+                keyboard_enhancement_supported: None,
+                kitty_graphics: false,
+                cell_size_pixels: None,
+            };
+            let mut saw_supported_keyboard = false;
+            update_startup_probe(
+                &mut probe,
+                &mut saw_supported_keyboard,
+                b"typed\x1B[6;20;10t\x1B_Gi=41;OK\x1B\\noise\x1B[20;10R\x1B]11;rgb:1111/1111/1111\x07\x1B]10;rgb:eeee/eeee/eeee\x1B\\",
+                StartupKeyboardEnhancementProbe::Skip,
+                41,
+            );
+
+            assert_eq!(probe.cell_size_pixels, Some((10, 20)));
+            assert!(probe.kitty_graphics);
+            assert!(startup_probe_complete(
+                &probe,
+                StartupKeyboardEnhancementProbe::Skip
+            ));
+        }
+
+        #[test]
+        fn kitty_parser_requires_matching_id_and_ok_status() {
+            assert!(parse_kitty_graphics_response(b"\x1B_Gi=88;OK\x1B\\", 88));
+            assert!(!parse_kitty_graphics_response(b"\x1B_Gi=87;OK\x1B\\", 88));
+            assert!(!parse_kitty_graphics_response(
+                b"\x1B_Gi=88;EINVAL: unsupported\x1B\\",
+                88
+            ));
+        }
+
+        #[test]
+        fn cell_size_parser_ignores_other_csi_t_reports() {
+            assert_eq!(
+                parse_cell_size_pixels(b"\x1B[8;24;80t\x1B[6;18;9t"),
+                Some((9, 18))
+            );
         }
     }
 }
@@ -891,6 +1045,16 @@ pub(crate) use imp::*;
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[cfg(unix)]
+    #[test]
+    fn derives_cell_size_from_vscode_remote_pty_geometry() {
+        assert_eq!(
+            cell_size_pixels_from_dimensions(867, 1207, 101, 67),
+            Some((9, 18))
+        );
+        assert_eq!(cell_size_pixels_from_dimensions(0, 0, 101, 67), None);
+    }
 
     #[test]
     fn parses_osc_colors_with_bel_and_st() {

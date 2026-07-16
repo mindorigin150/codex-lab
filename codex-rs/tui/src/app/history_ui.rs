@@ -10,6 +10,19 @@ const DESKTOP_THREAD_OPENED_MESSAGE: &str = "Opened this session in Codex Deskto
 impl App {
     pub(super) fn insert_history_cell(&mut self, tui: &mut tui::Tui, cell: Box<dyn HistoryCell>) {
         let cell: Arc<dyn HistoryCell> = cell.into();
+        if let Some(agent) = cell
+            .as_any()
+            .downcast_ref::<history_cell::AgentMarkdownCell>()
+            && agent.has_formulas()
+        {
+            let terminal_width = tui.terminal.last_known_screen_size.width;
+            let width = self.chat_widget.history_wrap_width(terminal_width);
+            if let Some(key) = tui.formula_render_key(width) {
+                agent.prepare_formulas(key, self.app_event_tx.clone());
+            } else {
+                super::agent_message_consolidation::show_formula_capability_warning_once(self, tui);
+            }
+        }
         if let Some(Overlay::Transcript(t)) = &mut self.overlay {
             t.insert_cell(cell.clone());
             tui.frame_requester().schedule_frame();
@@ -134,6 +147,7 @@ impl App {
 
         // Drop queued history insertions so stale transcript lines cannot be flushed after /clear.
         tui.clear_pending_history_lines();
+        tui.clear_formula_scrollback_images()?;
 
         if is_alt_screen_active {
             tui.terminal.clear_visible_screen()?;

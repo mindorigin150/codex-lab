@@ -1,6 +1,7 @@
 //! User, assistant, reasoning, and streaming message history cells.
 
 use super::*;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct UserHistoryCell {
@@ -363,8 +364,10 @@ impl HistoryCell for AgentMessageCell {
 /// transcript content change meaning after a later `/cd` or resumed session.
 #[derive(Debug)]
 pub(crate) struct AgentMarkdownCell {
+    cell_id: u64,
     markdown_source: String,
     cwd: PathBuf,
+    formulas: Arc<crate::formula_runtime::FormulaMessageState>,
 }
 
 impl AgentMarkdownCell {
@@ -374,46 +377,254 @@ impl AgentMarkdownCell {
     /// wrapped terminal lines. Passing rendered lines here would make future resize reflow preserve
     /// stale wrapping instead of repairing it.
     pub(crate) fn new(markdown_source: String, cwd: &Path) -> Self {
+        static NEXT_CELL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let formulas = crate::formula_runtime::FormulaMessageState::new(&markdown_source);
         Self {
+            cell_id: NEXT_CELL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             markdown_source,
             cwd: cwd.to_path_buf(),
+            formulas,
         }
+    }
+
+    pub(crate) fn cell_id(&self) -> u64 {
+        self.cell_id
+    }
+
+    pub(crate) fn has_formulas(&self) -> bool {
+        self.formulas.has_formulas()
+    }
+
+    pub(crate) fn prepare_formulas(
+        &self,
+        key: crate::formula_runtime::FormulaRenderKey,
+        app_event_tx: crate::app_event_sender::AppEventSender,
+    ) -> bool {
+        self.formulas.prepare(key, self.cell_id, app_event_tx)
+    }
+
+    pub(crate) fn deactivate_formulas(&self) {
+        self.formulas.deactivate();
+    }
+
+    pub(crate) fn formulas_ready(&self, key: crate::formula_runtime::FormulaRenderKey) -> bool {
+        self.formulas.is_ready(key)
+    }
+
+    pub(crate) fn take_formula_errors(&self, width: u16) -> Vec<String> {
+        self.formulas.take_errors(width)
+    }
+
+    fn rich_markdown_lines(&self, width: u16) -> Vec<RichHistoryLine> {
+        let Some(wrap_width) =
+            crate::width::usable_content_width_u16(width, /*reserved_cols*/ 2)
+        else {
+            return vec![RichHistoryLine::plain(HyperlinkLine::new(Line::default()))];
+        };
+        let Some(assets) = self.formulas.ready_assets(width) else {
+            return crate::markdown::render_markdown_agent_with_links_and_cwd(
+                &self.markdown_source,
+                Some(wrap_width),
+                Some(self.cwd.as_path()),
+            )
+            .into_iter()
+            .map(RichHistoryLine::plain)
+            .collect();
+        };
+        let masked = masked_formula_markdown(&self.markdown_source, &assets);
+        let rendered = crate::markdown::render_markdown_agent_with_links_and_cwd(
+            &masked,
+            Some(wrap_width),
+            Some(self.cwd.as_path()),
+        );
+        materialize_formula_lines(rendered, &assets, wrap_width as u16)
     }
 }
 
 impl HistoryCell for AgentMarkdownCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        visible_lines(self.display_hyperlink_lines(width))
+        self.display_rich_lines(width)
+            .into_iter()
+            .map(|line| line.text.line)
+            .collect()
     }
 
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        let Some(wrap_width) =
-            crate::width::usable_content_width_u16(width, /*reserved_cols*/ 2)
-        else {
-            return prefix_hyperlink_lines(
-                vec![HyperlinkLine::new(Line::default())],
-                "• ".dim(),
-                "  ".into(),
-            );
-        };
+        self.display_rich_lines(width)
+            .into_iter()
+            .map(|line| line.text)
+            .collect()
+    }
 
-        // Re-render markdown from source at the current width. Reserve 2 columns for the "• " /
-        // " " prefix prepended below.
-        let lines = crate::markdown::render_markdown_agent_with_links_and_cwd(
-            &self.markdown_source,
-            Some(wrap_width),
-            Some(self.cwd.as_path()),
-        );
-        prefix_hyperlink_lines(lines, "• ".dim(), "  ".into())
+    fn display_rich_lines(&self, width: u16) -> Vec<RichHistoryLine> {
+        prefix_rich_formula_lines(self.rich_markdown_lines(width))
     }
 
     fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         self.display_hyperlink_lines(width)
     }
 
+    fn transcript_rich_lines(&self, width: u16) -> Vec<RichHistoryLine> {
+        self.display_rich_lines(width)
+    }
+
     fn raw_lines(&self) -> Vec<Line<'static>> {
         raw_lines_from_source(&self.markdown_source)
     }
+}
+
+const FORMULA_MARKER_START: u32 = 0xe000;
+const ZERO_WIDTH_BREAK: char = '\u{200b}';
+const FORMULA_TOKEN_START: char = '\u{2063}';
+const FORMULA_TOKEN_END: char = '\u{2064}';
+
+fn formula_marker(index: usize) -> char {
+    let Some(marker) = char::from_u32(FORMULA_MARKER_START + index as u32) else {
+        unreachable!("formula marker range exhausted");
+    };
+    marker
+}
+
+fn formula_index(marker: char) -> Option<usize> {
+    let value = marker as u32;
+    (FORMULA_MARKER_START..FORMULA_MARKER_START + 128)
+        .contains(&value)
+        .then(|| (value - FORMULA_MARKER_START) as usize)
+}
+
+fn masked_formula_markdown(
+    source: &str,
+    assets: &[Result<crate::formula_runtime::FormulaAsset, String>],
+) -> String {
+    let mut masked = String::with_capacity(source.len());
+    let mut copied = 0usize;
+    for (index, asset) in assets.iter().enumerate() {
+        let Ok(asset) = asset else {
+            continue;
+        };
+        masked.push_str(&source[copied..asset.source.source_range.start]);
+        let marker = formula_marker(index);
+        let token = marker.to_string().repeat(usize::from(asset.layout.columns));
+        if asset.layout.is_block {
+            masked.push_str("\n\n");
+            masked.push(ZERO_WIDTH_BREAK);
+            masked.push(FORMULA_TOKEN_START);
+            masked.push_str(&token);
+            masked.push(FORMULA_TOKEN_END);
+            masked.push(ZERO_WIDTH_BREAK);
+            masked.push_str("\n\n");
+        } else {
+            masked.push(ZERO_WIDTH_BREAK);
+            masked.push(FORMULA_TOKEN_START);
+            masked.push_str(&token);
+            masked.push(FORMULA_TOKEN_END);
+            masked.push(ZERO_WIDTH_BREAK);
+        }
+        copied = asset.source.source_range.end;
+    }
+    masked.push_str(&source[copied..]);
+    masked
+}
+
+fn materialize_formula_lines(
+    lines: Vec<HyperlinkLine>,
+    assets: &[Result<crate::formula_runtime::FormulaAsset, String>],
+    width: u16,
+) -> Vec<RichHistoryLine> {
+    let mut output = Vec::new();
+    let mut inside_formula_token = false;
+    for mut line in lines {
+        let mut column = 0usize;
+        let mut placements = Vec::new();
+        let mut spans = Vec::with_capacity(line.line.spans.len());
+        for span in line.line.spans {
+            let mut text = String::with_capacity(span.content.len());
+            for ch in span.content.chars() {
+                if ch == FORMULA_TOKEN_START {
+                    inside_formula_token = true;
+                    continue;
+                }
+                if ch == FORMULA_TOKEN_END {
+                    inside_formula_token = false;
+                    continue;
+                }
+                if inside_formula_token
+                    && let Some(index) = formula_index(ch)
+                    && let Some(Ok(asset)) = assets.get(index)
+                {
+                    if placements
+                        .last()
+                        .is_none_or(|placement: &FormulaPlacement| placement.formula_index != index)
+                    {
+                        placements.push(FormulaPlacement {
+                            formula_index: index,
+                            column: column as u16,
+                            columns: asset.layout.columns,
+                            rows: asset.layout.rows,
+                            raster: asset.layout.raster.clone(),
+                        });
+                    }
+                    text.push(' ');
+                    column += 1;
+                } else {
+                    text.push(ch);
+                    column += ch.to_string().width();
+                }
+            }
+            spans.push(Span::styled(text, span.style));
+        }
+        line.line.spans = spans;
+        for placement in &mut placements {
+            if assets[placement.formula_index]
+                .as_ref()
+                .is_ok_and(|asset| asset.layout.is_block)
+            {
+                placement.column = placement
+                    .column
+                    .max(width.saturating_sub(placement.columns) / 2);
+            }
+        }
+        let continuation_rows = placements
+            .iter()
+            .map(|placement| placement.rows.saturating_sub(1))
+            .max()
+            .unwrap_or(0);
+        output.push(RichHistoryLine {
+            text: line,
+            formulas: placements,
+        });
+        output.extend((0..continuation_rows).map(|_| {
+            RichHistoryLine::plain(HyperlinkLine::new(Line::from(
+                " ".repeat(usize::from(width)),
+            )))
+        }));
+    }
+    output
+}
+
+fn prefix_rich_formula_lines(lines: Vec<RichHistoryLine>) -> Vec<RichHistoryLine> {
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut line)| {
+            let initial = if index == 0 {
+                "• ".dim()
+            } else {
+                "  ".into()
+            };
+            let Some(prefixed) = prefix_hyperlink_lines(vec![line.text], initial, "  ".into())
+                .into_iter()
+                .next()
+            else {
+                unreachable!("prefixing one history line returned no lines");
+            };
+            line.text = prefixed;
+            for placement in &mut line.formulas {
+                placement.column += 2;
+            }
+            line
+        })
+        .collect()
 }
 
 /// Transient active-cell representation of the mutable tail of an agent stream.
@@ -561,4 +772,153 @@ pub(crate) fn split_reasoning_summary_parts(reasoning_parts: &[String]) -> (Stri
     }
 
     (leading_empty_part_header.unwrap_or_default(), content)
+}
+
+#[cfg(test)]
+mod formula_image_tests {
+    use super::*;
+
+    #[test]
+    fn finalized_agent_markdown_materializes_formula_placements() {
+        let cell = AgentMarkdownCell::new(
+            "Inline $x+1$ then block:\n\n$$\\frac{a}{b}$$".to_string(),
+            Path::new("/tmp"),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let app_event_tx = crate::app_event_sender::AppEventSender::new(tx);
+        let key = crate::formula_runtime::FormulaRenderKey {
+            width: 80,
+            cell_pixel_width: 8,
+            cell_pixel_height: 16,
+            foreground_rgb: [230, 230, 230],
+        };
+
+        assert!(cell.prepare_formulas(key, app_event_tx));
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(crate::app_event::AppEvent::FormulaRenderReady { cell_id })
+                if cell_id == cell.cell_id()
+        ));
+
+        let lines = cell.display_rich_lines(80);
+        let errors = cell.take_formula_errors(80);
+        assert!(errors.is_empty(), "formula errors: {errors:?}");
+        let placements = lines
+            .iter()
+            .flat_map(|line| line.formulas.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(placements.len(), 2, "rendered lines: {lines:?}");
+        assert!(placements.iter().any(|placement| placement.rows > 1));
+        assert!(lines.iter().all(|line| {
+            line.text
+                .line
+                .spans
+                .iter()
+                .flat_map(|span| span.content.chars())
+                .all(|ch| {
+                    formula_index(ch).is_none()
+                        && ch != FORMULA_TOKEN_START
+                        && ch != FORMULA_TOKEN_END
+                })
+        }));
+        assert_eq!(
+            cell.markdown_source,
+            "Inline $x+1$ then block:\n\n$$\\frac{a}{b}$$"
+        );
+    }
+
+    #[test]
+    fn renders_vscode_replayed_formula_source() {
+        let cell = AgentMarkdownCell::new(
+            "# Fit \\(\\Delta\\)\n\n\\[\n\\Delta =\naction\\_ready\\_ms-worker\\_service\\_ms\n\\]\n\nRuntime: \\(action\\_ready=L_r+R_r+\\Delta\\)".to_string(),
+            Path::new("/tmp"),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let key = crate::formula_runtime::FormulaRenderKey {
+            width: 80,
+            cell_pixel_width: 9,
+            cell_pixel_height: 18,
+            foreground_rgb: [230, 230, 230],
+        };
+
+        assert!(cell.prepare_formulas(key, crate::app_event_sender::AppEventSender::new(tx)));
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(crate::app_event::AppEvent::FormulaRenderReady { .. })
+        ));
+
+        let lines = cell.display_rich_lines(80);
+        let errors = cell.take_formula_errors(80);
+        assert!(errors.is_empty(), "formula errors: {errors:?}");
+        assert_eq!(
+            lines.iter().flat_map(|line| line.formulas.iter()).count(),
+            3
+        );
+    }
+
+    #[test]
+    fn renders_learning_rate_formulas_in_markdown_table() {
+        let cell = AgentMarkdownCell::new(
+            "| Parameter | Learning rate |\n|---|---:|\n| VLA backbone / decoder | \\(2\\times10^{-5}\\) |\n| Vision-language connector | \\(1\\times10^{-5}\\) |\n| Action head | \\(1\\times10^{-4}\\) |\n\n\\[\n\\text{connector LR}=10^{-5},\\qquad\n\\text{action-head LR}=10^{-4}\n\\]"
+                .to_string(),
+            Path::new("/tmp"),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let key = crate::formula_runtime::FormulaRenderKey {
+            width: 101,
+            cell_pixel_width: 8,
+            cell_pixel_height: 18,
+            foreground_rgb: [171, 178, 191],
+        };
+
+        assert!(cell.prepare_formulas(key, crate::app_event_sender::AppEventSender::new(tx)));
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(crate::app_event::AppEvent::FormulaRenderReady { .. })
+        ));
+
+        let lines = cell.display_rich_lines(101);
+        let errors = cell.take_formula_errors(101);
+        assert!(errors.is_empty(), "formula errors: {errors:?}");
+        let placements = lines
+            .iter()
+            .flat_map(|line| line.formulas.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(placements.len(), 4, "rendered lines: {lines:?}");
+        assert_eq!(
+            placements
+                .iter()
+                .filter(|placement| placement.rows == 1)
+                .count(),
+            3
+        );
+        assert!(placements.iter().any(|placement| placement.rows == 2));
+    }
+
+    #[test]
+    fn user_private_use_characters_are_not_formula_markers() {
+        let source = "Private \u{e07f} then $x$";
+        let cell = AgentMarkdownCell::new(source.to_string(), Path::new("/tmp"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let key = crate::formula_runtime::FormulaRenderKey {
+            width: 80,
+            cell_pixel_width: 8,
+            cell_pixel_height: 16,
+            foreground_rgb: [230, 230, 230],
+        };
+
+        assert!(cell.prepare_formulas(key, crate::app_event_sender::AppEventSender::new(tx)));
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(crate::app_event::AppEvent::FormulaRenderReady { .. })
+        ));
+
+        let rendered = cell
+            .display_rich_lines(80)
+            .into_iter()
+            .flat_map(|line| line.text.line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+        assert!(rendered.contains('\u{e07f}'));
+    }
 }

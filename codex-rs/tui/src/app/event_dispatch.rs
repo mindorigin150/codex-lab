@@ -248,6 +248,42 @@ impl App {
                 self.chat_widget.note_stream_consolidation_completed();
                 self.insert_pending_usage_output_after_stream_shutdown(tui);
             }
+            AppEvent::FormulaRenderReady { cell_id } => {
+                let terminal_width = tui.terminal.size()?.width;
+                let width = self.chat_widget.history_wrap_width(terminal_width);
+                let formula_cell_index = self.transcript_cells.iter().position(|cell| {
+                    cell.as_any()
+                        .downcast_ref::<history_cell::AgentMarkdownCell>()
+                        .is_some_and(|cell| cell.cell_id() == cell_id)
+                });
+                let ready_and_errors = formula_cell_index.and_then(|index| {
+                    let cell = self.transcript_cells[index]
+                        .as_any()
+                        .downcast_ref::<history_cell::AgentMarkdownCell>()?;
+                    let key = tui.formula_render_key(width)?;
+                    cell.formulas_ready(key)
+                        .then(|| (index, cell.take_formula_errors(width)))
+                });
+                if let Some((index, errors)) = ready_and_errors {
+                    if !errors.is_empty() {
+                        let warning: Arc<dyn HistoryCell> = Arc::new(
+                            history_cell::new_error_event(format!(
+                                "LaTeX image rendering failed for {} formula(s): {}. Formula source was preserved.",
+                                errors.len(),
+                                errors[0]
+                            )),
+                        );
+                        self.transcript_cells.insert(index + 1, warning);
+                        if let Some(Overlay::Transcript(transcript)) = &mut self.overlay {
+                            transcript.replace_cells(self.transcript_cells.clone());
+                        }
+                    }
+                    if self.overlay.is_some() {
+                        tui.frame_requester().schedule_frame();
+                    }
+                    self.finish_required_stream_reflow(tui)?;
+                }
+            }
             AppEvent::ConsolidateProposedPlan(source) => {
                 let end = self.transcript_cells.len();
                 let start = trailing_run_start::<history_cell::ProposedPlanStreamCell>(

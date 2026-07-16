@@ -36,6 +36,7 @@ pub(super) async fn make_test_app() -> App {
         deferred_history_lines: Vec::new(),
         has_emitted_history_lines: false,
         transcript_reflow: TranscriptReflowState::default(),
+        last_formula_render_environment: None,
         initial_history_replay_buffer: None,
         enhanced_keys_supported: false,
         keymap: crate::keymap::RuntimeKeymap::defaults(),

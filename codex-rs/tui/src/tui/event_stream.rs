@@ -17,6 +17,8 @@
 //!
 //! See https://ratatui.rs/recipes/apps/spawn-vim/ and https://www.reddit.com/r/rust/comments/1f3o33u/myterious_crossterm_input_after_running_vim for more details.
 
+#[cfg(unix)]
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -146,6 +148,10 @@ pub struct TuiEventStream<S: EventSource + Default + Unpin = CrosstermEventSourc
     suspend_context: crate::tui::job_control::SuspendContext,
     #[cfg(unix)]
     alt_screen_active: Arc<AtomicBool>,
+    #[cfg(unix)]
+    formula_scrollback_image_ids: Arc<Mutex<Vec<u32>>>,
+    #[cfg(unix)]
+    formula_overlay_image_ids: Arc<Mutex<Vec<u32>>>,
 }
 
 impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
@@ -155,6 +161,8 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
         terminal_focused: Arc<AtomicBool>,
         #[cfg(unix)] suspend_context: crate::tui::job_control::SuspendContext,
         #[cfg(unix)] alt_screen_active: Arc<AtomicBool>,
+        #[cfg(unix)] formula_scrollback_image_ids: Arc<Mutex<Vec<u32>>>,
+        #[cfg(unix)] formula_overlay_image_ids: Arc<Mutex<Vec<u32>>>,
     ) -> Self {
         let resume_stream = WatchStream::from_changes(broker.resume_events_rx());
         Self {
@@ -167,7 +175,31 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
             suspend_context,
             #[cfg(unix)]
             alt_screen_active,
+            #[cfg(unix)]
+            formula_scrollback_image_ids,
+            #[cfg(unix)]
+            formula_overlay_image_ids,
         }
+    }
+
+    #[cfg(unix)]
+    fn clear_formula_images_before_suspend(&self) -> std::io::Result<()> {
+        let mut scrollback = self
+            .formula_scrollback_image_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut overlay = self
+            .formula_overlay_image_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut output = std::io::stdout().lock();
+        for image_id in scrollback.iter().chain(overlay.iter()) {
+            output.write_all(crate::terminal_images::delete_image(*image_id).as_bytes())?;
+        }
+        output.flush()?;
+        scrollback.clear();
+        overlay.clear();
+        Ok(())
     }
 
     /// Poll the shared crossterm stream for the next mapped `TuiEvent`.
@@ -240,6 +272,13 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
                 #[cfg(unix)]
                 if crate::tui::job_control::SUSPEND_KEY.is_press(key_event) {
                     self.broker.pause_events();
+                    if let Err(err) = self.clear_formula_images_before_suspend() {
+                        tracing::warn!(
+                            event = "tui_formula_image_cleanup_failed",
+                            error = %err,
+                            "failed to clear formula images before suspending TUI process"
+                        );
+                    }
                     let suspend_result = self.suspend_context.suspend(&self.alt_screen_active);
                     self.broker.resume_events();
                     if let Err(err) = suspend_result {
@@ -375,6 +414,10 @@ mod tests {
             crate::tui::job_control::SuspendContext::new(),
             #[cfg(unix)]
             Arc::new(AtomicBool::new(false)),
+            #[cfg(unix)]
+            Arc::new(Mutex::new(Vec::new())),
+            #[cfg(unix)]
+            Arc::new(Mutex::new(Vec::new())),
         )
     }
 
