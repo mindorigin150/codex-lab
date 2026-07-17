@@ -1,6 +1,5 @@
 use anyhow::Result;
 use codex_features::Feature;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
@@ -13,7 +12,6 @@ use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
-use core_test_support::wait_for_event;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
@@ -226,6 +224,9 @@ async fn user_input_temporarily_releases_the_explorer_barrier_without_cancelling
                 config.model_provider.request_max_retries = Some(0);
                 config.model_provider.stream_max_retries = Some(0);
                 config.model_provider.supports_websockets = false;
+                config.multi_agent_v2.min_wait_timeout_ms = 10;
+                config.multi_agent_v2.default_wait_timeout_ms = 50;
+                config.multi_agent_v2.max_wait_timeout_ms = 1_000;
             })
             .build(&server)
             .await?,
@@ -235,10 +236,16 @@ async fn user_input_temporarily_releases_the_explorer_barrier_without_cancelling
         async move { test.submit_turn(INITIAL_PROMPT).await }
     });
 
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::CollabWaitingBegin(_))
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !child.requests().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     })
-    .await;
+    .await
+    .map_err(|_| anyhow::anyhow!("explorer did not start before steered input"))?;
     test.codex
         .steer_input(
             vec![UserInput::Text {

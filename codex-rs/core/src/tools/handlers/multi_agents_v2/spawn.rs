@@ -112,29 +112,32 @@ async fn prepare_spawn_agent(
     }
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+    let validate_effective_model_overrides = args.model.is_some()
+        || args.reasoning_effort.is_some()
+        || turn.config.agent_default_subagent_model.is_some()
+        || turn
+            .config
+            .agent_default_subagent_reasoning_effort
+            .is_some();
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }
-    if matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)) {
-        reject_full_fork_model_overrides(args.model.as_deref(), args.reasoning_effort.clone())?;
-        apply_role_to_config(&mut config, Some(role_name))
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
-    } else {
-        apply_requested_spawn_agent_model_overrides(
-            &session,
-            turn.as_ref(),
-            &mut config,
-            args.model.as_deref(),
-            args.reasoning_effort.clone(),
-        )
-        .await?;
-        apply_role_to_config(&mut config, Some(role_name))
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
+    apply_requested_spawn_agent_model_overrides(
+        session,
+        turn.as_ref(),
+        &mut config,
+        args.model.as_deref(),
+        args.reasoning_effort.clone(),
+    )
+    .await?;
+    apply_role_to_config(&mut config, Some(role_name))
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+    if validate_effective_model_overrides {
+        validate_effective_spawn_agent_model_overrides(session, turn.as_ref(), &config).await?;
     }
     apply_spawn_agent_service_tier(
-        &session,
+        session,
         &mut config,
         turn.config.service_tier.as_deref(),
         args.service_tier.as_deref(),
@@ -481,19 +484,6 @@ struct SpawnedAgentResult {
     result: SpawnAgentResult,
     activity: SubAgentActivityItem,
     role_name: String,
-}
-
-fn reject_full_fork_model_overrides(
-    model: Option<&str>,
-    reasoning_effort: Option<ReasoningEffort>,
-) -> Result<(), FunctionCallError> {
-    if model.is_some() || reasoning_effort.is_some() {
-        return Err(FunctionCallError::RespondToModel(
-            "Full-history forked agents inherit the parent model and reasoning effort; omit model and reasoning_effort, or spawn without a full-history fork."
-                .to_string(),
-        ));
-    }
-    Ok(())
 }
 
 impl SpawnAgentArgs {

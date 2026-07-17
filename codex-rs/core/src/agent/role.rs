@@ -2,9 +2,9 @@
 //!
 //! Roles are selected at spawn time and are loaded with the same config machinery as
 //! `config.toml`. This module resolves built-in and user-defined role files, inserts the role as a
-//! high-precedence layer, and preserves the caller's current provider and service tier unless the
-//! role layer sets them. It does not decide when to spawn a sub-agent or which role to use; the
-//! multi-agent tool handler owns that orchestration.
+//! high-precedence layer, and preserves the caller's current model, reasoning effort, provider,
+//! and service tier unless the role layer sets them. It does not decide when to spawn a sub-agent
+//! or which role to use; the multi-agent tool handler owns that orchestration.
 
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
@@ -78,6 +78,7 @@ async fn apply_role_to_config_inner(
     let preserve_current_reasoning_effort = role_layer_toml.get("model_reasoning_effort").is_none();
     let preserve_current_reasoning_summary =
         role_layer_toml.get("model_reasoning_summary").is_none();
+    let preserve_current_permissions = !role_layer_overrides_permissions(&role_layer_toml);
 
     *config = reload::build_next_config(
         config,
@@ -87,9 +88,25 @@ async fn apply_role_to_config_inner(
         preserve_current_model,
         preserve_current_reasoning_effort,
         preserve_current_reasoning_summary,
+        preserve_current_permissions,
     )
     .await?;
     Ok(())
+}
+
+fn role_layer_overrides_permissions(role_layer_toml: &TomlValue) -> bool {
+    [
+        "approval_policy",
+        "allow_login_shell",
+        "shell_environment_policy",
+        "sandbox_mode",
+        "sandbox_workspace_write",
+        "default_permissions",
+        "permissions",
+        "windows",
+    ]
+    .into_iter()
+    .any(|key| role_layer_toml.get(key).is_some())
 }
 
 async fn load_role_layer_toml(
@@ -139,6 +156,7 @@ pub(crate) fn resolve_role_config<'a>(
 mod reload {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn build_next_config(
         config: &Config,
         role_layer_toml: TomlValue,
@@ -147,6 +165,7 @@ mod reload {
         preserve_current_model: bool,
         preserve_current_reasoning_effort: bool,
         preserve_current_reasoning_summary: bool,
+        preserve_current_permissions: bool,
     ) -> anyhow::Result<Config> {
         let config_layer_stack = build_config_layer_stack(config, &role_layer_toml)?;
         let merged_config = deserialize_effective_config(config, &config_layer_stack)?;
@@ -168,10 +187,15 @@ mod reload {
             next_config.model_provider = config.model_provider.clone();
         }
         if preserve_current_reasoning_effort {
-            next_config.model_reasoning_effort = config.model_reasoning_effort.clone();
+            next_config
+                .model_reasoning_effort
+                .clone_from(&config.model_reasoning_effort);
         }
         if preserve_current_reasoning_summary {
             next_config.model_reasoning_summary = config.model_reasoning_summary;
+        }
+        if preserve_current_permissions {
+            next_config.permissions.clone_from(&config.permissions);
         }
         Ok(next_config)
     }
@@ -269,10 +293,7 @@ pub(crate) mod spawn_tool_spec {
             }
         }
 
-        format!(
-            "Optional type name for the new agent. If omitted, `{DEFAULT_ROLE_NAME}` is used.\nAvailable roles:\n{}",
-            formatted_roles.join("\n"),
-        )
+        format!("Available roles:\n{}", formatted_roles.join("\n"))
     }
 
     fn format_role(name: &str, declaration: &AgentRoleConfig) -> String {

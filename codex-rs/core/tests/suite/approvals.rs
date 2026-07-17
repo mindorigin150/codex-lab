@@ -53,7 +53,6 @@ use pretty_assertions::assert_eq;
 use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
-use std::env;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -83,9 +82,7 @@ impl TargetPath {
                 (path, name.to_string())
             }
             TargetPath::OutsideWorkspace(name) => {
-                let path = env::current_dir()
-                    .expect("current dir should be available")
-                    .join(name);
+                let path = test.home.path().join(name);
                 (path.clone(), path.display().to_string())
             }
         }
@@ -2003,9 +2000,9 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
         "approval scenario {} result: exit_code={:?} stdout={:?}",
         scenario.name, result.exit_code, result.stdout
     );
-    scenario.expectation.verify(&test, &result)?;
-
-    Ok(())
+    let verification_result = scenario.expectation.verify(&test, &result);
+    test.codex.shutdown_and_wait().await?;
+    verification_result
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2313,6 +2310,10 @@ async fn spawned_subagent_execpolicy_amendment_propagates_to_parent_session() ->
             .features
             .enable(Feature::Collab)
             .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::UseLegacyLandlock)
+            .expect("test config should allow feature update");
     });
     let test = builder.build(&server).await?;
 
@@ -2378,26 +2379,6 @@ async fn spawned_subagent_execpolicy_amendment_propagates_to_parent_session() ->
             ev_response_created("resp-parent-2"),
             ev_assistant_message("msg-parent-2", "parent done"),
             ev_completed("resp-parent-2"),
-        ]),
-    )
-    .await;
-
-    let _ = mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-parent-3"),
-            ev_function_call(PARENT_CALL_ID_2, "shell_command", &child_cmd_args),
-            ev_completed("resp-parent-3"),
-        ]),
-    )
-    .await;
-
-    let _ = mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-parent-4"),
-            ev_assistant_message("msg-parent-4", "parent rerun done"),
-            ev_completed("resp-parent-4"),
         ]),
     )
     .await;
@@ -2472,6 +2453,26 @@ async fn spawned_subagent_execpolicy_amendment_propagates_to_parent_session() ->
         !child_file.exists(),
         "expected child file to be removed before parent rerun"
     );
+
+    let _ = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-parent-3"),
+            ev_function_call(PARENT_CALL_ID_2, "shell_command", &child_cmd_args),
+            ev_completed("resp-parent-3"),
+        ]),
+    )
+    .await;
+
+    let _ = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-parent-4"),
+            ev_assistant_message("msg-parent-4", "parent rerun done"),
+            ev_completed("resp-parent-4"),
+        ]),
+    )
+    .await;
 
     submit_turn(
         &test,
@@ -3419,6 +3420,12 @@ allow_local_binding = true
         policy_contents.contains(&expected_rule),
         "unexpected policy contents: {policy_contents}"
     );
+    assert!(first_results.requests().iter().any(|request| {
+        request.body_contains_text(&format!(
+            "Denied network rule saved in execpolicy (denylist): {}",
+            deny_network_amendment.host
+        ))
+    }));
 
     let first_output = parse_result(
         &first_results

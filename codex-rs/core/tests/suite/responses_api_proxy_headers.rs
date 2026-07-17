@@ -90,6 +90,10 @@ async fn responses_api_parent_and_subagent_requests_include_identity_headers() -
             .features
             .disable(Feature::EnableRequestCompression)
             .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::UseLegacyLandlock)
+            .expect("test config should allow feature update");
     });
     let test = builder.build(&server).await?;
     submit_turn_with_timeout(&test, PARENT_PROMPT).await?;

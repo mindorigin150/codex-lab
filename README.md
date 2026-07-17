@@ -17,6 +17,9 @@ The official installers below install the stock `codex` command. To use the
 multi-agent and lifecycle changes in this repository, build and install the
 fork from source instead:
 
+See the [Codex Lab fork feature matrix](./CODEX_LAB_FEATURES.md) for the maintained semantic
+differences from upstream Codex.
+
 ```shell
 git clone https://github.com/mindorigin150/codex-lab.git
 cd codex-lab

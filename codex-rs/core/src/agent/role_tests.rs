@@ -122,6 +122,38 @@ async fn apply_reviewer_role_enforces_read_only() {
 }
 
 #[tokio::test]
+async fn apply_role_preserves_runtime_permissions_without_override() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
+        .expect("runtime permission profile should apply");
+    config.permissions.allow_login_shell = false;
+    let runtime_permissions = config.permissions.clone();
+    let role_path = write_role_config(
+        &home,
+        "instructions-only.toml",
+        r#"developer_instructions = "Stay focused"
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect("custom role should apply");
+
+    assert_eq!(config.permissions, runtime_permissions);
+}
+
+#[tokio::test]
 async fn apply_role_preserves_runtime_workspace_roots() {
     let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let primary_root = AbsolutePathBuf::from_absolute_path(home.path().join("primary"))
@@ -226,8 +258,8 @@ async fn apply_role_preserves_unspecified_keys() {
     config.main_execve_wrapper_exe = Some(PathBuf::from("/tmp/codex-execve-wrapper"));
     let role_path = write_role_config(
         &home,
-        "effort-only.toml",
-        "developer_instructions = \"Stay focused\"\nmodel_reasoning_effort = \"high\"",
+        "instructions-only.toml",
+        "developer_instructions = \"Stay focused\"",
     )
     .await;
     config.agent_roles.insert(
@@ -239,12 +271,17 @@ async fn apply_role_preserves_unspecified_keys() {
         },
     );
 
+    config.model = Some("spawn-model".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::Low);
+
     apply_role_to_config(&mut config, Some("custom"))
         .await
         .expect("custom role should apply");
 
-    assert_eq!(config.model.as_deref(), Some("base-model"));
-    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(
+        (config.model.as_deref(), config.model_reasoning_effort),
+        (Some("spawn-model"), Some(ReasoningEffort::Low)),
+    );
     assert_eq!(
         config.codex_linux_sandbox_exe,
         Some(PathBuf::from("/tmp/codex-linux-sandbox"))
