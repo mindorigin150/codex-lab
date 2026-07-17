@@ -1,4 +1,4 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
+<p align="center"><strong>Codex Lab</strong> is a source-built fork of OpenAI Codex CLI focused on reliable multi-agent workflows and long-running terminal sessions.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
 </p>
@@ -9,16 +9,42 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ---
 
+## Why Codex Lab?
+
+Codex Lab tracks upstream Codex while preserving a small set of fork-specific guarantees.
+
+### Codex Lab enhancements
+
+- **Context-isolated agents.** Explorer agents always start with fresh context. Built-in explorer
+  and reviewer roles are read-only, remain bounded by the parent's permissions, and cannot delegate
+  beyond the configured depth.
+- **Reliable delegation lifecycle.** Blocking explorer and reviewer work cannot be silently dropped
+  when the parent finishes. Interrupts, retries, late completions, and resumed sessions retain the
+  correct task generation, while `list_agents` exposes each agent's latest plaintext assignment.
+- **Bounded terminal output.** Oversized unified-exec output is stored in private local artifacts
+  instead of being copied into model context, with bounded previews and explicit result metadata.
+- **Terminal LaTeX images.** The TUI renders math through MathJax as transparent PNG images and
+  rebuilds terminal placement across resize, pager, backtrack, and scrollback changes.
+- **Isolated installation.** The versioned `codex-lab` launcher coexists with stock `codex`, uses a
+  separate configuration home, and can bundle Bubblewrap on Linux without requiring `sudo`.
+
+### Context, compaction, and memory
+
+These capabilities track current upstream Codex rather than being presented as fork-only features:
+
+- **Long-session context management.** Automatic compaction, configurable pre-rollover fallback,
+  and paginated history replay keep long-running and spawned-agent sessions manageable.
+- **Opt-in memory pipelines.** When enabled, Codex extracts reusable knowledge from recent root
+  sessions and consolidates it into local memory artifacts. Experimental external-agent memory
+  imports retain their project scope and provenance.
+
 ## Quickstart
 
 ### Installing Codex Lab (this fork)
 
 The official installers below install the stock `codex` command. To use the
-multi-agent and lifecycle changes in this repository, build and install the
-fork from source instead:
-
-See the [Codex Lab fork feature matrix](./CODEX_LAB_FEATURES.md) for the maintained semantic
-differences from upstream Codex.
+multi-agent, lifecycle, terminal-output, and LaTeX changes in this repository,
+build and install the fork from source instead:
 
 ```shell
 git clone https://github.com/mindorigin150/codex-lab.git
