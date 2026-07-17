@@ -459,6 +459,19 @@ def test_generated_chatgpt_account_email_is_required_nullable() -> None:
         ChatgptAccount.model_validate({"planType": "pro", "type": "chatgpt"})
 
 
+def test_generated_bedrock_account_reports_codex_managed_credentials() -> None:
+    from openai_codex.generated.v2_all import AmazonBedrockAccount
+
+    account = AmazonBedrockAccount.model_validate(
+        {"type": "amazonBedrock", "usesCodexManagedCredentials": True}
+    )
+    assert account.uses_codex_managed_credentials is True
+    assert account.model_dump(by_alias=True, mode="json") == {
+        "type": "amazonBedrock",
+        "usesCodexManagedCredentials": True,
+    }
+
+
 def test_runtime_package_template_has_no_checked_in_binaries() -> None:
     runtime_root = ROOT.parent / "python-runtime" / "src" / "codex_cli_bin"
     assert sorted(

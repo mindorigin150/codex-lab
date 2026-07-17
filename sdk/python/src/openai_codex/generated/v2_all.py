@@ -33,6 +33,16 @@ class ApiKeyAccount(BaseModel):
     type: Annotated[Literal["apiKey"], Field(title="ApiKeyAccountType")]
 
 
+class AmazonBedrockAccount(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["amazonBedrock"], Field(title="AmazonBedrockAccountType")]
+    uses_codex_managed_credentials: Annotated[
+        bool | None, Field(alias="usesCodexManagedCredentials")
+    ] = False
+
+
 class AccountLoginCompletedNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -145,11 +155,6 @@ class AgentPath(RootModel[str]):
     root: str
 
 
-class AmazonBedrockCredentialSource(Enum):
-    codex_managed = "codexManaged"
-    aws_managed = "awsManaged"
-
-
 class AnalyticsConfig(BaseModel):
     model_config = ConfigDict(
         extra="allow",
@@ -217,6 +222,15 @@ class AppToolConfig(BaseModel):
     enabled: bool | None = None
 
 
+class AppToolSummary(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    description: str
+    name: str
+    title: str | None = None
+
+
 class AppToolsConfig(BaseModel):
     pass
     model_config = ConfigDict(
@@ -264,6 +278,26 @@ class AppsListParams(BaseModel):
         Field(
             alias="threadId",
             description="Optional thread id used to evaluate app feature gating from that thread's config.",
+        ),
+    ] = None
+
+
+class AppsReadParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    app_ids: Annotated[
+        list[str],
+        Field(
+            alias="appIds",
+            description="App ids to read. The server accepts at most 100 ids and deduplicates repeated ids while preserving their first-request order.",
+        ),
+    ]
+    include_tools: Annotated[
+        bool | None,
+        Field(
+            alias="includeTools",
+            description="When true, include display-only public tool summaries in the returned metadata.",
         ),
     ] = None
 
@@ -834,6 +868,17 @@ class ConfiguredHookMatcherGroup(BaseModel):
     matcher: str | None = None
 
 
+class ConnectorMetadata(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    description: str | None = None
+    icon_url: Annotated[str | None, Field(alias="iconUrl")] = None
+    id: str
+    name: str
+    tool_summaries: Annotated[list[AppToolSummary] | None, Field(alias="toolSummaries")] = None
+
+
 class ConsumeAccountRateLimitResetCreditOutcome(Enum):
     reset = "reset"
     nothing_to_reset = "nothingToReset"
@@ -1001,6 +1046,14 @@ class DynamicToolSpec(RootModel[FunctionDynamicToolSpec | NamespaceDynamicToolSp
     root: FunctionDynamicToolSpec | NamespaceDynamicToolSpec
 
 
+class EnvironmentConnectionNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    environment_id: Annotated[str, Field(alias="environmentId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
 class ExperimentalFeatureEnablementSetParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -1065,6 +1118,19 @@ class ExternalAgentConfigDetectParams(BaseModel):
             description="If true, include detection under the user's home directory.",
         ),
     ] = None
+    migration_source: Annotated[
+        str | None,
+        Field(
+            alias="migrationSource",
+            description="Optional migration-source selector. Missing or unrecognized values use the default source.",
+        ),
+    ] = None
+    source: Annotated[
+        str | None,
+        Field(
+            description="Deprecated field retained for compatibility. This field is ignored; use `migrationSource` to select the migration source."
+        ),
+    ] = None
 
 
 class ExternalAgentConfigImportResponse(BaseModel):
@@ -1083,7 +1149,15 @@ class ExternalAgentConfigMigrationItemType(Enum):
     subagents = "SUBAGENTS"
     hooks = "HOOKS"
     commands = "COMMANDS"
+    memory = "MEMORY"
     sessions = "SESSIONS"
+
+
+class ExternalAgentImportedConnectorSource(RootModel[Literal["remoteMcpServersConfig"]]):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: Literal["remoteMcpServersConfig"]
 
 
 class FeedbackUploadParams(BaseModel):
@@ -1143,14 +1217,6 @@ class MinimalFileSystemSpecialPath(BaseModel):
     kind: Literal["minimal"]
 
 
-class KindFileSystemSpecialPath(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    kind: Literal["project_roots"]
-    subpath: str | None = None
-
-
 class TmpdirFileSystemSpecialPath(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -1163,38 +1229,6 @@ class SlashTmpFileSystemSpecialPath(BaseModel):
         populate_by_name=True,
     )
     kind: Literal["slash_tmp"]
-
-
-class FileSystemSpecialPath1(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    kind: Literal["unknown"]
-    path: str
-    subpath: str | None = None
-
-
-class FileSystemSpecialPath(
-    RootModel[
-        RootFileSystemSpecialPath
-        | MinimalFileSystemSpecialPath
-        | KindFileSystemSpecialPath
-        | TmpdirFileSystemSpecialPath
-        | SlashTmpFileSystemSpecialPath
-        | FileSystemSpecialPath1
-    ]
-):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    root: (
-        RootFileSystemSpecialPath
-        | MinimalFileSystemSpecialPath
-        | KindFileSystemSpecialPath
-        | TmpdirFileSystemSpecialPath
-        | SlashTmpFileSystemSpecialPath
-        | FileSystemSpecialPath1
-    )
 
 
 class ForcedChatgptWorkspaceIds(RootModel[str | list[str]]):
@@ -1840,6 +1874,17 @@ class ChatgptAuthTokensLoginAccountParams(BaseModel):
     ]
 
 
+class AmazonBedrockLoginAccountParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    api_key: Annotated[str, Field(alias="apiKey")]
+    region: str
+    type: Annotated[
+        Literal["amazonBedrock"], Field(title="AmazonBedrockv2::LoginAccountParamsType")
+    ]
+
+
 class ApiKeyLoginAccountResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -1892,12 +1937,22 @@ class ChatgptAuthTokensLoginAccountResponse(BaseModel):
     ]
 
 
+class AmazonBedrockLoginAccountResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[
+        Literal["amazonBedrock"], Field(title="AmazonBedrockv2::LoginAccountResponseType")
+    ]
+
+
 class LoginAccountResponse(
     RootModel[
         ApiKeyLoginAccountResponse
         | ChatgptLoginAccountResponse
         | ChatgptDeviceCodeLoginAccountResponse
         | ChatgptAuthTokensLoginAccountResponse
+        | AmazonBedrockLoginAccountResponse
     ]
 ):
     model_config = ConfigDict(
@@ -1907,7 +1962,8 @@ class LoginAccountResponse(
         ApiKeyLoginAccountResponse
         | ChatgptLoginAccountResponse
         | ChatgptDeviceCodeLoginAccountResponse
-        | ChatgptAuthTokensLoginAccountResponse,
+        | ChatgptAuthTokensLoginAccountResponse
+        | AmazonBedrockLoginAccountResponse,
         Field(title="LoginAccountResponse"),
     ]
 
@@ -2147,7 +2203,6 @@ class McpToolCallAppContext(BaseModel):
     connector_id: Annotated[str, Field(alias="connectorId")]
     link_id: Annotated[str | None, Field(alias="linkId")] = None
     resource_uri: Annotated[str | None, Field(alias="resourceUri")] = None
-    template_id: Annotated[str | None, Field(alias="templateId")] = None
 
 
 class McpToolCallError(BaseModel):
@@ -2937,6 +2992,7 @@ class RateLimitWindow(BaseModel):
 class RealtimeConversationVersion(Enum):
     v1 = "v1"
     v2 = "v2"
+    v3 = "v3"
 
 
 class RealtimeOutputModality(Enum):
@@ -3518,6 +3574,32 @@ class SandboxWorkspaceWrite(BaseModel):
     writable_roots: list[str] | None = []
 
 
+class DailyScheduledTaskSchedule(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    time: str
+    type: Annotated[Literal["daily"], Field(title="DailyScheduledTaskScheduleType")]
+
+
+class WeekdaysScheduledTaskSchedule(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    time: str
+    type: Annotated[Literal["weekdays"], Field(title="WeekdaysScheduledTaskScheduleType")]
+
+
+class ScheduledTaskWeekday(Enum):
+    mo = "MO"
+    tu = "TU"
+    we = "WE"
+    th = "TH"
+    fr = "FR"
+    sa = "SA"
+    su = "SU"
+
+
 class SelectedCapabilityRoot(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -3544,10 +3626,53 @@ class SendAddCreditsNudgeEmailResponse(BaseModel):
     status: AddCreditsNudgeEmailStatus
 
 
+class ThreadEnvironmentConnectedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["thread/environment/connected"],
+        Field(title="Thread/environment/connectedNotificationMethod"),
+    ]
+    params: EnvironmentConnectionNotification
+
+
+class ThreadEnvironmentDisconnectedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["thread/environment/disconnected"],
+        Field(title="Thread/environment/disconnectedNotificationMethod"),
+    ]
+    params: EnvironmentConnectionNotification
+
+
 class ItemAgentMessageDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/agentMessage/delta"], Field(title="Item/agentMessage/deltaNotificationMethod")
     ]
@@ -3558,6 +3683,13 @@ class ItemPlanDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["item/plan/delta"], Field(title="Item/plan/deltaNotificationMethod")]
     params: PlanDeltaNotification
 
@@ -3566,6 +3698,13 @@ class ProcessExitedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["process/exited"], Field(title="Process/exitedNotificationMethod")]
     params: ProcessExitedNotification
 
@@ -3574,6 +3713,13 @@ class ItemCommandExecutionOutputDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/commandExecution/outputDelta"],
         Field(title="Item/commandExecution/outputDeltaNotificationMethod"),
@@ -3585,6 +3731,13 @@ class ItemFileChangeOutputDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/fileChange/outputDelta"],
         Field(title="Item/fileChange/outputDeltaNotificationMethod"),
@@ -3596,6 +3749,13 @@ class ItemMcpToolCallProgressServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/mcpToolCall/progress"],
         Field(title="Item/mcpToolCall/progressNotificationMethod"),
@@ -3607,6 +3767,13 @@ class McpServerOauthLoginCompletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["mcpServer/oauthLogin/completed"],
         Field(title="McpServer/oauthLogin/completedNotificationMethod"),
@@ -3618,6 +3785,13 @@ class McpServerStartupStatusUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["mcpServer/startupStatus/updated"],
         Field(title="McpServer/startupStatus/updatedNotificationMethod"),
@@ -3629,6 +3803,13 @@ class RemoteControlStatusChangedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["remoteControl/status/changed"],
         Field(title="RemoteControl/status/changedNotificationMethod"),
@@ -3640,6 +3821,13 @@ class FsChangedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["fs/changed"], Field(title="Fs/changedNotificationMethod")]
     params: FsChangedNotification
 
@@ -3648,6 +3836,13 @@ class ItemReasoningSummaryTextDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/reasoning/summaryTextDelta"],
         Field(title="Item/reasoning/summaryTextDeltaNotificationMethod"),
@@ -3659,6 +3854,13 @@ class ItemReasoningSummaryPartAddedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/reasoning/summaryPartAdded"],
         Field(title="Item/reasoning/summaryPartAddedNotificationMethod"),
@@ -3670,6 +3872,13 @@ class ItemReasoningTextDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/reasoning/textDelta"],
         Field(title="Item/reasoning/textDeltaNotificationMethod"),
@@ -3681,6 +3890,13 @@ class ThreadCompactedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/compacted"], Field(title="Thread/compactedNotificationMethod")
     ]
@@ -3691,6 +3907,13 @@ class ModelReroutedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["model/rerouted"], Field(title="Model/reroutedNotificationMethod")]
     params: ModelReroutedNotification
 
@@ -3699,6 +3922,13 @@ class ModelVerificationServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["model/verification"], Field(title="Model/verificationNotificationMethod")
     ]
@@ -3709,6 +3939,13 @@ class ModelSafetyBufferingUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["model/safetyBuffering/updated"],
         Field(title="Model/safetyBuffering/updatedNotificationMethod"),
@@ -3720,6 +3957,13 @@ class GuardianWarningServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["guardianWarning"], Field(title="GuardianWarningNotificationMethod")]
     params: GuardianWarningNotification
 
@@ -3728,6 +3972,13 @@ class DeprecationNoticeServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["deprecationNotice"], Field(title="DeprecationNoticeNotificationMethod")
     ]
@@ -3738,6 +3989,13 @@ class FuzzyFileSearchSessionUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["fuzzyFileSearch/sessionUpdated"],
         Field(title="FuzzyFileSearch/sessionUpdatedNotificationMethod"),
@@ -3749,6 +4007,13 @@ class FuzzyFileSearchSessionCompletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["fuzzyFileSearch/sessionCompleted"],
         Field(title="FuzzyFileSearch/sessionCompletedNotificationMethod"),
@@ -3760,6 +4025,13 @@ class AccountLoginCompletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["account/login/completed"], Field(title="Account/login/completedNotificationMethod")
     ]
@@ -4762,6 +5034,7 @@ class TokenUsageBreakdown(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    cache_write_input_tokens: Annotated[int | None, Field(alias="cacheWriteInputTokens")] = 0
     cached_input_tokens: Annotated[int, Field(alias="cachedInputTokens")]
     input_tokens: Annotated[int, Field(alias="inputTokens")]
     output_tokens: Annotated[int, Field(alias="outputTokens")]
@@ -4798,6 +5071,13 @@ class TurnEnvironmentParams(BaseModel):
     )
     cwd: LegacyAppPathString
     environment_id: Annotated[str, Field(alias="environmentId")]
+    runtime_workspace_roots: Annotated[
+        list[LegacyAppPathString] | None,
+        Field(
+            alias="runtimeWorkspaceRoots",
+            description="Environment-native runtime workspace roots. Omitted defaults to `cwd`.",
+        ),
+    ] = None
 
 
 class TurnInterruptParams(BaseModel):
@@ -5079,16 +5359,6 @@ class ChatgptAccount(BaseModel):
     type: Annotated[Literal["chatgpt"], Field(title="ChatgptAccountType")]
 
 
-class AmazonBedrockAccount(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    credential_source: Annotated[
-        AmazonBedrockCredentialSource | None, Field(alias="credentialSource")
-    ] = "awsManaged"
-    type: Annotated[Literal["amazonBedrock"], Field(title="AmazonBedrockAccountType")]
-
-
 class Account(RootModel[ApiKeyAccount | ChatgptAccount | AmazonBedrockAccount]):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -5167,6 +5437,14 @@ class AppsConfig(BaseModel):
         populate_by_name=True,
     )
     field_default: Annotated[AppsDefaultConfig | None, Field(alias="_default")] = None
+
+
+class AppsReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    apps: list[ConnectorMetadata]
+    missing_app_ids: Annotated[list[str], Field(alias="missingAppIds")]
 
 
 class CancelLoginAccountResponse(BaseModel):
@@ -5463,6 +5741,15 @@ class PluginShareDeleteRequest(BaseModel):
         Literal["plugin/share/delete"], Field(title="Plugin/share/deleteRequestMethod")
     ]
     params: PluginShareDeleteParams
+
+
+class AppReadRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["app/read"], Field(title="App/readRequestMethod")]
+    params: AppsReadParams
 
 
 class AppListRequest(BaseModel):
@@ -6213,6 +6500,7 @@ class ExternalAgentConfigImportItemTypeFailure(BaseModel):
     item_type: Annotated[ExternalAgentConfigMigrationItemType, Field(alias="itemType")]
     message: str
     source: str | None = None
+    sub_error_type: Annotated[str | None, Field(alias="subErrorType")] = None
 
 
 class ExternalAgentConfigImportItemTypeSuccess(BaseModel):
@@ -6234,6 +6522,15 @@ class ExternalAgentConfigImportTypeResult(BaseModel):
     successes: list[ExternalAgentConfigImportItemTypeSuccess]
 
 
+class ExternalAgentImportedConnectorCandidate(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    name: str
+    session_count: Annotated[int, Field(alias="sessionCount", ge=0)]
+    source: ExternalAgentImportedConnectorSource
+
+
 class PathFileSystemPath(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -6242,29 +6539,44 @@ class PathFileSystemPath(BaseModel):
     type: Annotated[Literal["path"], Field(title="PathFileSystemPathType")]
 
 
-class SpecialFileSystemPath(BaseModel):
+class KindFileSystemSpecialPath(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    type: Annotated[Literal["special"], Field(title="SpecialFileSystemPathType")]
-    value: FileSystemSpecialPath
+    kind: Literal["project_roots"]
+    subpath: LegacyAppPathString | None = None
 
 
-class FileSystemPath(
-    RootModel[PathFileSystemPath | GlobPatternFileSystemPath | SpecialFileSystemPath]
+class FileSystemSpecialPath1(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    kind: Literal["unknown"]
+    path: str
+    subpath: LegacyAppPathString | None = None
+
+
+class FileSystemSpecialPath(
+    RootModel[
+        RootFileSystemSpecialPath
+        | MinimalFileSystemSpecialPath
+        | KindFileSystemSpecialPath
+        | TmpdirFileSystemSpecialPath
+        | SlashTmpFileSystemSpecialPath
+        | FileSystemSpecialPath1
+    ]
 ):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    root: PathFileSystemPath | GlobPatternFileSystemPath | SpecialFileSystemPath
-
-
-class FileSystemSandboxEntry(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
+    root: (
+        RootFileSystemSpecialPath
+        | MinimalFileSystemSpecialPath
+        | KindFileSystemSpecialPath
+        | TmpdirFileSystemSpecialPath
+        | SlashTmpFileSystemSpecialPath
+        | FileSystemSpecialPath1
     )
-    access: FileSystemAccessMode
-    path: FileSystemPath
 
 
 class FileUpdateChange(BaseModel):
@@ -6474,6 +6786,7 @@ class LoginAccountParams(
         | ChatgptLoginAccountParams
         | ChatgptDeviceCodeLoginAccountParams
         | ChatgptAuthTokensLoginAccountParams
+        | AmazonBedrockLoginAccountParams
     ]
 ):
     model_config = ConfigDict(
@@ -6483,7 +6796,8 @@ class LoginAccountParams(
         ApiKeyLoginAccountParams
         | ChatgptLoginAccountParams
         | ChatgptDeviceCodeLoginAccountParams
-        | ChatgptAuthTokensLoginAccountParams,
+        | ChatgptAuthTokensLoginAccountParams
+        | AmazonBedrockLoginAccountParams,
         Field(title="LoginAccountParams"),
     ]
 
@@ -6522,6 +6836,7 @@ class MigrationDetails(BaseModel):
     commands: list[CommandMigration] | None = []
     hooks: list[HookMigration] | None = []
     mcp_servers: Annotated[list[McpServerMigration] | None, Field(alias="mcpServers")] = []
+    memory: list[str] | None = None
     plugins: list[PluginsMigration] | None = []
     sessions: list[SessionMigration] | None = []
     skills: list[SkillMigration] | None = []
@@ -6737,6 +7052,23 @@ class RateLimitSnapshot(BaseModel):
         RateLimitReachedType | None, Field(alias="rateLimitReachedType")
     ] = None
     secondary: RateLimitWindow | None = None
+    spend_control_reached: Annotated[
+        bool | None,
+        Field(
+            alias="spendControlReached",
+            description="Backend-reported spend-control state. `None` is unavailable, not a sparse-update recovery.",
+        ),
+    ] = None
+
+
+class RawResponseCompletedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    response_id: Annotated[str, Field(alias="responseId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+    usage: TokenUsageBreakdown | None = None
 
 
 class MessageResponseItem(BaseModel):
@@ -6776,10 +7108,64 @@ class ReviewStartParams(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
 
 
+class HourlyScheduledTaskSchedule(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    days: list[ScheduledTaskWeekday] | None = None
+    interval_hours: Annotated[int, Field(alias="intervalHours", ge=0)]
+    type: Annotated[Literal["hourly"], Field(title="HourlyScheduledTaskScheduleType")]
+
+
+class WeeklyScheduledTaskSchedule(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    days: list[ScheduledTaskWeekday]
+    time: str
+    type: Annotated[Literal["weekly"], Field(title="WeeklyScheduledTaskScheduleType")]
+
+
+class ScheduledTaskSchedule(
+    RootModel[
+        HourlyScheduledTaskSchedule
+        | DailyScheduledTaskSchedule
+        | WeekdaysScheduledTaskSchedule
+        | WeeklyScheduledTaskSchedule
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: (
+        HourlyScheduledTaskSchedule
+        | DailyScheduledTaskSchedule
+        | WeekdaysScheduledTaskSchedule
+        | WeeklyScheduledTaskSchedule
+    )
+
+
+class ScheduledTaskSummary(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    key: str
+    name: str
+    prompt: str
+    schedule: ScheduledTaskSchedule
+
+
 class ThreadStatusChangedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/status/changed"], Field(title="Thread/status/changedNotificationMethod")
     ]
@@ -6790,6 +7176,13 @@ class ThreadArchivedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["thread/archived"], Field(title="Thread/archivedNotificationMethod")]
     params: ThreadArchivedNotification
 
@@ -6798,6 +7191,13 @@ class ThreadDeletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["thread/deleted"], Field(title="Thread/deletedNotificationMethod")]
     params: ThreadDeletedNotification
 
@@ -6806,6 +7206,13 @@ class ThreadUnarchivedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/unarchived"], Field(title="Thread/unarchivedNotificationMethod")
     ]
@@ -6816,6 +7223,13 @@ class ThreadClosedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["thread/closed"], Field(title="Thread/closedNotificationMethod")]
     params: ThreadClosedNotification
 
@@ -6824,6 +7238,13 @@ class SkillsChangedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["skills/changed"], Field(title="Skills/changedNotificationMethod")]
     params: SkillsChangedNotification
 
@@ -6832,6 +7253,13 @@ class ThreadNameUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/name/updated"], Field(title="Thread/name/updatedNotificationMethod")
     ]
@@ -6842,6 +7270,13 @@ class ThreadGoalClearedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/goal/cleared"], Field(title="Thread/goal/clearedNotificationMethod")
     ]
@@ -6852,6 +7287,13 @@ class HookStartedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["hook/started"], Field(title="Hook/startedNotificationMethod")]
     params: HookStartedNotification
 
@@ -6860,6 +7302,13 @@ class TurnDiffUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["turn/diff/updated"], Field(title="Turn/diff/updatedNotificationMethod")
     ]
@@ -6870,6 +7319,13 @@ class CommandExecOutputDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["command/exec/outputDelta"],
         Field(title="Command/exec/outputDeltaNotificationMethod"),
@@ -6881,6 +7337,13 @@ class ProcessOutputDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["process/outputDelta"], Field(title="Process/outputDeltaNotificationMethod")
     ]
@@ -6891,6 +7354,13 @@ class ItemCommandExecutionTerminalInteractionServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/commandExecution/terminalInteraction"],
         Field(title="Item/commandExecution/terminalInteractionNotificationMethod"),
@@ -6902,6 +7372,13 @@ class ServerRequestResolvedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["serverRequest/resolved"], Field(title="ServerRequest/resolvedNotificationMethod")
     ]
@@ -6912,6 +7389,13 @@ class AccountUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["account/updated"], Field(title="Account/updatedNotificationMethod")]
     params: AccountUpdatedNotification
 
@@ -6920,6 +7404,13 @@ class TurnModerationMetadataServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["turn/moderationMetadata"], Field(title="Turn/moderationMetadataNotificationMethod")
     ]
@@ -6930,6 +7421,13 @@ class WarningServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["warning"], Field(title="WarningNotificationMethod")]
     params: WarningNotification
 
@@ -6938,6 +7436,13 @@ class ConfigWarningServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["configWarning"], Field(title="ConfigWarningNotificationMethod")]
     params: ConfigWarningNotification
 
@@ -6946,6 +7451,13 @@ class ThreadRealtimeStartedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/realtime/started"], Field(title="Thread/realtime/startedNotificationMethod")
     ]
@@ -6956,6 +7468,13 @@ class ThreadRealtimeItemAddedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/realtime/itemAdded"],
         Field(title="Thread/realtime/itemAddedNotificationMethod"),
@@ -6967,6 +7486,13 @@ class ThreadRealtimeTranscriptDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/realtime/transcript/delta"],
         Field(title="Thread/realtime/transcript/deltaNotificationMethod"),
@@ -6978,6 +7504,13 @@ class ThreadRealtimeTranscriptDoneServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/realtime/transcript/done"],
         Field(title="Thread/realtime/transcript/doneNotificationMethod"),
@@ -6989,6 +7522,13 @@ class ThreadRealtimeOutputAudioDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/realtime/outputAudio/delta"],
         Field(title="Thread/realtime/outputAudio/deltaNotificationMethod"),
@@ -7000,6 +7540,13 @@ class ThreadRealtimeSdpServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/realtime/sdp"], Field(title="Thread/realtime/sdpNotificationMethod")
     ]
@@ -7010,6 +7557,13 @@ class ThreadRealtimeErrorServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/realtime/error"], Field(title="Thread/realtime/errorNotificationMethod")
     ]
@@ -7020,6 +7574,13 @@ class ThreadRealtimeClosedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/realtime/closed"], Field(title="Thread/realtime/closedNotificationMethod")
     ]
@@ -7030,6 +7591,13 @@ class WindowsWorldWritableWarningServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["windows/worldWritableWarning"],
         Field(title="Windows/worldWritableWarningNotificationMethod"),
@@ -7281,6 +7849,12 @@ class WebSearchThreadItem(BaseModel):
     action: WebSearchAction | None = None
     id: str
     query: str
+    results: Annotated[
+        list | None,
+        Field(
+            description="Structured search results returned out-of-band by standalone web search.\n\nThese stay as opaque JSON at the extension/app-server boundary so new result fields and result types can pass through without a Codex release."
+        ),
+    ] = None
     type: Annotated[Literal["webSearch"], Field(title="WebSearchThreadItemType")]
 
 
@@ -7329,6 +7903,14 @@ class ThreadItem(
         | ExitedReviewModeThreadItem
         | ContextCompactionThreadItem
     )
+
+
+class ThreadItemEntry(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    item: ThreadItem
+    turn_id: Annotated[str, Field(alias="turnId", description="Turn containing this item.")]
 
 
 class ThreadListParams(BaseModel):
@@ -7656,22 +8238,6 @@ class AccountRateLimitsUpdatedNotification(BaseModel):
     rate_limits: Annotated[RateLimitSnapshot, Field(alias="rateLimits")]
 
 
-class AdditionalFileSystemPermissions(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    entries: list[FileSystemSandboxEntry] | None = None
-    glob_scan_max_depth: Annotated[int | None, Field(alias="globScanMaxDepth", ge=1)] = None
-    read: Annotated[
-        list[LegacyAppPathString] | None,
-        Field(description="This will be removed in favor of `entries`."),
-    ] = None
-    write: Annotated[
-        list[LegacyAppPathString] | None,
-        Field(description="This will be removed in favor of `entries`."),
-    ] = None
-
-
 class AppInfo(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7992,6 +8558,31 @@ class FileChangePatchUpdatedNotification(BaseModel):
     turn_id: Annotated[str, Field(alias="turnId")]
 
 
+class SpecialFileSystemPath(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["special"], Field(title="SpecialFileSystemPathType")]
+    value: FileSystemSpecialPath
+
+
+class FileSystemPath(
+    RootModel[PathFileSystemPath | GlobPatternFileSystemPath | SpecialFileSystemPath]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: PathFileSystemPath | GlobPatternFileSystemPath | SpecialFileSystemPath
+
+
+class FileSystemSandboxEntry(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    access: FileSystemAccessMode
+    path: FileSystemPath
+
+
 class FunctionCallOutputBody(RootModel[str | list[FunctionCallOutputContentItem]]):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -8178,15 +8769,6 @@ class PluginSummary(BaseModel):
     ] = None
 
 
-class RequestPermissionProfile(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        populate_by_name=True,
-    )
-    file_system: Annotated[AdditionalFileSystemPermissions | None, Field(alias="fileSystem")] = None
-    network: AdditionalNetworkPermissions | None = None
-
-
 class FunctionCallOutputResponseItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -8261,6 +8843,13 @@ class ErrorServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["error"], Field(title="ErrorNotificationMethod")]
     params: ErrorNotification
 
@@ -8269,6 +8858,13 @@ class ThreadGoalUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/goal/updated"], Field(title="Thread/goal/updatedNotificationMethod")
     ]
@@ -8279,6 +8875,13 @@ class ThreadSettingsUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/settings/updated"], Field(title="Thread/settings/updatedNotificationMethod")
     ]
@@ -8289,6 +8892,13 @@ class ThreadTokenUsageUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["thread/tokenUsage/updated"],
         Field(title="Thread/tokenUsage/updatedNotificationMethod"),
@@ -8300,6 +8910,13 @@ class HookCompletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["hook/completed"], Field(title="Hook/completedNotificationMethod")]
     params: HookCompletedNotification
 
@@ -8308,6 +8925,13 @@ class TurnPlanUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["turn/plan/updated"], Field(title="Turn/plan/updatedNotificationMethod")
     ]
@@ -8318,6 +8942,13 @@ class ItemStartedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["item/started"], Field(title="Item/startedNotificationMethod")]
     params: ItemStartedNotification
 
@@ -8326,6 +8957,13 @@ class ItemCompletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["item/completed"], Field(title="Item/completedNotificationMethod")]
     params: ItemCompletedNotification
 
@@ -8334,6 +8972,13 @@ class ItemFileChangePatchUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["item/fileChange/patchUpdated"],
         Field(title="Item/fileChange/patchUpdatedNotificationMethod"),
@@ -8345,6 +8990,13 @@ class AccountRateLimitsUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["account/rateLimits/updated"],
         Field(title="Account/rateLimits/updatedNotificationMethod"),
@@ -8356,6 +9008,13 @@ class AppListUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["app/list/updated"], Field(title="App/list/updatedNotificationMethod")
     ]
@@ -8366,6 +9025,13 @@ class ExternalAgentConfigImportProgressServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["externalAgentConfig/import/progress"],
         Field(title="ExternalAgentConfig/import/progressNotificationMethod"),
@@ -8377,6 +9043,13 @@ class ExternalAgentConfigImportCompletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["externalAgentConfig/import/completed"],
         Field(title="ExternalAgentConfig/import/completedNotificationMethod"),
@@ -8388,6 +9061,13 @@ class WindowsSandboxSetupCompletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[
         Literal["windowsSandbox/setupCompleted"],
         Field(title="WindowsSandbox/setupCompletedNotificationMethod"),
@@ -8482,6 +9162,22 @@ class TurnsPage(BaseModel):
     next_cursor: Annotated[str | None, Field(alias="nextCursor")] = None
 
 
+class AdditionalFileSystemPermissions(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    entries: list[FileSystemSandboxEntry] | None = None
+    glob_scan_max_depth: Annotated[int | None, Field(alias="globScanMaxDepth", ge=1)] = None
+    read: Annotated[
+        list[LegacyAppPathString] | None,
+        Field(description="This will be removed in favor of `entries`."),
+    ] = None
+    write: Annotated[
+        list[LegacyAppPathString] | None,
+        Field(description="This will be removed in favor of `entries`."),
+    ] = None
+
+
 class PluginShareSaveRequest(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -8556,6 +9252,7 @@ class ExternalAgentConfigImportHistoriesReadResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    connectors: list[ExternalAgentImportedConnectorCandidate]
     data: list[ExternalAgentConfigImportHistory]
 
 
@@ -8566,109 +9263,17 @@ class ExternalAgentConfigImportParams(BaseModel):
     migration_items: Annotated[
         list[ExternalAgentConfigMigrationItem], Field(alias="migrationItems")
     ]
+    migration_source: Annotated[
+        str | None,
+        Field(
+            alias="migrationSource",
+            description="Migration-source selector used to produce the migration items. Pass the same value to detection and import; missing or unrecognized values use the default source.",
+        ),
+    ] = None
     source: Annotated[
         str | None,
-        Field(
-            description="Source product that produced the migration items. Missing means unspecified."
-        ),
+        Field(description="Optional identifier for the product that initiated the import."),
     ] = None
-
-
-class RequestPermissionsGuardianApprovalReviewAction(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    permissions: RequestPermissionProfile
-    reason: str | None = None
-    type: Annotated[
-        Literal["requestPermissions"],
-        Field(title="RequestPermissionsGuardianApprovalReviewActionType"),
-    ]
-
-
-class GuardianApprovalReviewAction(
-    RootModel[
-        CommandGuardianApprovalReviewAction
-        | ExecveGuardianApprovalReviewAction
-        | ApplyPatchGuardianApprovalReviewAction
-        | NetworkAccessGuardianApprovalReviewAction
-        | McpToolCallGuardianApprovalReviewAction
-        | RequestPermissionsGuardianApprovalReviewAction
-    ]
-):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    root: (
-        CommandGuardianApprovalReviewAction
-        | ExecveGuardianApprovalReviewAction
-        | ApplyPatchGuardianApprovalReviewAction
-        | NetworkAccessGuardianApprovalReviewAction
-        | McpToolCallGuardianApprovalReviewAction
-        | RequestPermissionsGuardianApprovalReviewAction
-    )
-
-
-class ItemGuardianApprovalReviewCompletedNotification(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    action: GuardianApprovalReviewAction
-    completed_at_ms: Annotated[
-        int,
-        Field(
-            alias="completedAtMs",
-            description="Unix timestamp (in milliseconds) when this review completed.",
-        ),
-    ]
-    decision_source: Annotated[AutoReviewDecisionSource, Field(alias="decisionSource")]
-    review: GuardianApprovalReview
-    review_id: Annotated[
-        str, Field(alias="reviewId", description="Stable identifier for this review.")
-    ]
-    started_at_ms: Annotated[
-        int,
-        Field(
-            alias="startedAtMs",
-            description="Unix timestamp (in milliseconds) when this review started.",
-        ),
-    ]
-    target_item_id: Annotated[
-        str | None,
-        Field(
-            alias="targetItemId",
-            description="Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
-        ),
-    ] = None
-    thread_id: Annotated[str, Field(alias="threadId")]
-    turn_id: Annotated[str, Field(alias="turnId")]
-
-
-class ItemGuardianApprovalReviewStartedNotification(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    action: GuardianApprovalReviewAction
-    review: GuardianApprovalReview
-    review_id: Annotated[
-        str, Field(alias="reviewId", description="Stable identifier for this review.")
-    ]
-    started_at_ms: Annotated[
-        int,
-        Field(
-            alias="startedAtMs",
-            description="Unix timestamp (in milliseconds) when this review started.",
-        ),
-    ]
-    target_item_id: Annotated[
-        str | None,
-        Field(
-            alias="targetItemId",
-            description="Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
-        ),
-    ] = None
-    thread_id: Annotated[str, Field(alias="threadId")]
-    turn_id: Annotated[str, Field(alias="turnId")]
 
 
 class PluginDetail(BaseModel):
@@ -8682,6 +9287,9 @@ class PluginDetail(BaseModel):
     marketplace_name: Annotated[str, Field(alias="marketplaceName")]
     marketplace_path: Annotated[AbsolutePathBuf | None, Field(alias="marketplacePath")] = None
     mcp_servers: Annotated[list[str], Field(alias="mcpServers")]
+    scheduled_tasks: Annotated[list[ScheduledTaskSummary] | None, Field(alias="scheduledTasks")] = (
+        None
+    )
     share_url: Annotated[str | None, Field(alias="shareUrl")] = None
     skills: list[SkillSummary]
     summary: PluginSummary
@@ -8733,6 +9341,15 @@ class RawResponseItemCompletedNotification(BaseModel):
     turn_id: Annotated[str, Field(alias="turnId")]
 
 
+class RequestPermissionProfile(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    file_system: Annotated[AdditionalFileSystemPermissions | None, Field(alias="fileSystem")] = None
+    network: AdditionalNetworkPermissions | None = None
+
+
 class ReviewStartResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -8751,6 +9368,13 @@ class TurnStartedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["turn/started"], Field(title="Turn/startedNotificationMethod")]
     params: TurnStartedNotification
 
@@ -8759,30 +9383,15 @@ class TurnCompletedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["turn/completed"], Field(title="Turn/completedNotificationMethod")]
     params: TurnCompletedNotification
-
-
-class ItemAutoApprovalReviewStartedServerNotification(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    method: Annotated[
-        Literal["item/autoApprovalReview/started"],
-        Field(title="Item/autoApprovalReview/startedNotificationMethod"),
-    ]
-    params: ItemGuardianApprovalReviewStartedNotification
-
-
-class ItemAutoApprovalReviewCompletedServerNotification(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    method: Annotated[
-        Literal["item/autoApprovalReview/completed"],
-        Field(title="Item/autoApprovalReview/completedNotificationMethod"),
-    ]
-    params: ItemGuardianApprovalReviewCompletedNotification
 
 
 class Thread(BaseModel):
@@ -9117,6 +9726,7 @@ class ClientRequest(
         | PluginShareListRequest
         | PluginShareCheckoutRequest
         | PluginShareDeleteRequest
+        | AppReadRequest
         | AppListRequest
         | FsReadFileRequest
         | FsWriteFileRequest
@@ -9210,6 +9820,7 @@ class ClientRequest(
         | PluginShareListRequest
         | PluginShareCheckoutRequest
         | PluginShareDeleteRequest
+        | AppReadRequest
         | AppListRequest
         | FsReadFileRequest
         | FsWriteFileRequest
@@ -9265,6 +9876,103 @@ class ClientRequest(
     ]
 
 
+class RequestPermissionsGuardianApprovalReviewAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    permissions: RequestPermissionProfile
+    reason: str | None = None
+    type: Annotated[
+        Literal["requestPermissions"],
+        Field(title="RequestPermissionsGuardianApprovalReviewActionType"),
+    ]
+
+
+class GuardianApprovalReviewAction(
+    RootModel[
+        CommandGuardianApprovalReviewAction
+        | ExecveGuardianApprovalReviewAction
+        | ApplyPatchGuardianApprovalReviewAction
+        | NetworkAccessGuardianApprovalReviewAction
+        | McpToolCallGuardianApprovalReviewAction
+        | RequestPermissionsGuardianApprovalReviewAction
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: (
+        CommandGuardianApprovalReviewAction
+        | ExecveGuardianApprovalReviewAction
+        | ApplyPatchGuardianApprovalReviewAction
+        | NetworkAccessGuardianApprovalReviewAction
+        | McpToolCallGuardianApprovalReviewAction
+        | RequestPermissionsGuardianApprovalReviewAction
+    )
+
+
+class ItemGuardianApprovalReviewCompletedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    action: GuardianApprovalReviewAction
+    completed_at_ms: Annotated[
+        int,
+        Field(
+            alias="completedAtMs",
+            description="Unix timestamp (in milliseconds) when this review completed.",
+        ),
+    ]
+    decision_source: Annotated[AutoReviewDecisionSource, Field(alias="decisionSource")]
+    review: GuardianApprovalReview
+    review_id: Annotated[
+        str, Field(alias="reviewId", description="Stable identifier for this review.")
+    ]
+    started_at_ms: Annotated[
+        int,
+        Field(
+            alias="startedAtMs",
+            description="Unix timestamp (in milliseconds) when this review started.",
+        ),
+    ]
+    target_item_id: Annotated[
+        str | None,
+        Field(
+            alias="targetItemId",
+            description="Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
+        ),
+    ] = None
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
+class ItemGuardianApprovalReviewStartedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    action: GuardianApprovalReviewAction
+    review: GuardianApprovalReview
+    review_id: Annotated[
+        str, Field(alias="reviewId", description="Stable identifier for this review.")
+    ]
+    started_at_ms: Annotated[
+        int,
+        Field(
+            alias="startedAtMs",
+            description="Unix timestamp (in milliseconds) when this review started.",
+        ),
+    ]
+    target_item_id: Annotated[
+        str | None,
+        Field(
+            alias="targetItemId",
+            description="Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
+        ),
+    ] = None
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
 class PluginInstalledResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -9290,8 +9998,51 @@ class ThreadStartedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
     method: Annotated[Literal["thread/started"], Field(title="Thread/startedNotificationMethod")]
     params: ThreadStartedNotification
+
+
+class ItemAutoApprovalReviewStartedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["item/autoApprovalReview/started"],
+        Field(title="Item/autoApprovalReview/startedNotificationMethod"),
+    ]
+    params: ItemGuardianApprovalReviewStartedNotification
+
+
+class ItemAutoApprovalReviewCompletedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["item/autoApprovalReview/completed"],
+        Field(title="Item/autoApprovalReview/completedNotificationMethod"),
+    ]
+    params: ItemGuardianApprovalReviewCompletedNotification
 
 
 class ServerNotification(
@@ -9307,6 +10058,8 @@ class ServerNotification(
         | ThreadNameUpdatedServerNotification
         | ThreadGoalUpdatedServerNotification
         | ThreadGoalClearedServerNotification
+        | ThreadEnvironmentConnectedServerNotification
+        | ThreadEnvironmentDisconnectedServerNotification
         | ThreadSettingsUpdatedServerNotification
         | ThreadTokenUsageUpdatedServerNotification
         | TurnStartedServerNotification
@@ -9381,6 +10134,8 @@ class ServerNotification(
         | ThreadNameUpdatedServerNotification
         | ThreadGoalUpdatedServerNotification
         | ThreadGoalClearedServerNotification
+        | ThreadEnvironmentConnectedServerNotification
+        | ThreadEnvironmentDisconnectedServerNotification
         | ThreadSettingsUpdatedServerNotification
         | ThreadTokenUsageUpdatedServerNotification
         | TurnStartedServerNotification

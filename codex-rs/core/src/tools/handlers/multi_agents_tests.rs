@@ -144,6 +144,39 @@ model_reasoning_effort = "minimal"
     role_name
 }
 
+async fn install_valid_v2_role_with_model_override(turn: &mut TurnContext) -> String {
+    let role_name = "v2-fork-context-role".to_string();
+    tokio::fs::create_dir_all(&turn.config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let role_config_path = turn
+        .config
+        .codex_home
+        .as_path()
+        .join("v2-fork-context-role.toml");
+    tokio::fs::write(
+        &role_config_path,
+        r#"model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
+"#,
+    )
+    .await
+    .expect("role config should be written");
+
+    let mut config = (*turn.config).clone();
+    config.agent_roles.insert(
+        role_name.clone(),
+        AgentRoleConfig {
+            description: Some("V2 role with validated model overrides".to_string()),
+            config_file: Some(role_config_path),
+            nickname_candidates: None,
+        },
+    );
+    turn.config = Arc::new(config);
+
+    role_name
+}
+
 fn set_turn_config(turn: &mut TurnContext, config: crate::config::Config) {
     turn.multi_agent_version = config.multi_agent_version_from_features();
     turn.config = Arc::new(config);
@@ -414,7 +447,7 @@ async fn spawn_agent_fork_context_rejects_agent_type_override() {
 #[tokio::test]
 async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type() {
     let (mut session, mut turn) = make_session_and_context().await;
-    let role_name = install_role_with_model_override(&mut turn).await;
+    let role_name = install_valid_v2_role_with_model_override(&mut turn).await;
     let manager = thread_manager();
     let root = manager
         .start_thread((*turn.config).clone())
@@ -464,9 +497,9 @@ async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type() {
         .config_snapshot()
         .await;
 
-    assert_eq!(snapshot.model, "gpt-5-role-override");
-    assert_eq!(snapshot.model_provider_id, "ollama");
-    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
+    assert_eq!(snapshot.model, "gpt-5.6-terra");
+    assert_eq!(snapshot.model_provider_id, "openai");
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::High));
 }
 
 #[tokio::test]
@@ -720,9 +753,7 @@ async fn multi_agent_v2_validates_effective_model_overrides_after_role_applicati
             function_payload(json!({
                 "message": "inspect this repo",
                 "task_name": "backend-role",
-                "agent_type": "backend-role",
-                "model": "gpt-5.6-terra",
-                "reasoning_effort": "high"
+                "agent_type": "backend-role"
             })),
         ))
         .await
@@ -1256,7 +1287,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
 #[tokio::test]
 async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
     let (mut session, mut turn) = make_session_and_context().await;
-    let role_name = install_role_with_model_override(&mut turn).await;
+    let role_name = install_valid_v2_role_with_model_override(&mut turn).await;
     let manager = thread_manager();
     let root = manager
         .start_thread((*turn.config).clone())
@@ -1306,9 +1337,9 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         .config_snapshot()
         .await;
 
-    assert_eq!(snapshot.model, "gpt-5-role-override");
-    assert_eq!(snapshot.model_provider_id, "ollama");
-    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
+    assert_eq!(snapshot.model, "gpt-5.6-terra");
+    assert_eq!(snapshot.model_provider_id, "openai");
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::High));
 }
 
 #[tokio::test]

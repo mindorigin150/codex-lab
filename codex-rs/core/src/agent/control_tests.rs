@@ -643,7 +643,8 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
     let harness = AgentControlHarness::new_with_config(home, config).await;
-    let (parent_thread_id, _parent_thread) = harness.start_paginated_thread().await;
+    let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
+    let parent_config = parent_thread.config().await;
     let agent_path = AgentPath::try_from("/root/worker").expect("agent path");
     let spawned_agent = harness
         .control
@@ -701,16 +702,40 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         Ok(_) => panic!("expected thread to be removed"),
     }
 
+    let mismatched_home = TempDir::new().expect("create mismatched sender cwd");
+    let mismatched_cwd =
+        codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(mismatched_home.path())
+            .expect("mismatched cwd should be absolute");
+    let mut mismatched_config = harness.config.clone();
+    mismatched_config.model = Some("mismatched-sender-model".to_string());
+    mismatched_config.cwd = mismatched_cwd.clone();
+    mismatched_config.workspace_roots = vec![mismatched_cwd];
+    mismatched_config
+        .permissions
+        .set_permission_profile(PermissionProfile::read_only())
+        .expect("mismatched sender permission profile should be valid");
+
     harness
         .control
-        .ensure_v2_agent_loaded(harness.config.clone(), spawned_agent.thread_id)
+        .ensure_v2_agent_loaded(mismatched_config, spawned_agent.thread_id)
         .await
         .expect("known v2 agent should reload");
-    let _ = harness
+    let reloaded_child = harness
         .manager
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("reloaded child thread should exist");
+    let reloaded_config = reloaded_child.config().await;
+    assert_eq!(reloaded_config.model, parent_config.model);
+    assert_eq!(reloaded_config.cwd, parent_config.cwd);
+    assert_eq!(
+        reloaded_config.workspace_roots,
+        parent_config.workspace_roots
+    );
+    assert_eq!(
+        reloaded_config.permissions.effective_permission_profile(),
+        parent_config.permissions.effective_permission_profile()
+    );
 
     let communication = InterAgentCommunication::new(
         AgentPath::root(),
@@ -3838,10 +3863,26 @@ fn completion_receipts_track_queued_generations_in_order() {
 
     let first = control.reserve_agent_generation(agent_id);
     let second = control.reserve_agent_generation(agent_id);
-    control.record_completion_delivery(agent_id, AgentStatus::Completed(Some("first".into())));
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Deliver(generation) if generation == first
+    ));
+    control.record_completion_delivery(
+        agent_id,
+        first,
+        AgentStatus::Completed(Some("first".into())),
+    );
     assert_eq!(control.current_completion_receipt(agent_id), None);
 
-    control.record_completion_delivery(agent_id, AgentStatus::Completed(Some("second".into())));
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Deliver(generation) if generation == second
+    ));
+    control.record_completion_delivery(
+        agent_id,
+        second,
+        AgentStatus::Completed(Some("second".into())),
+    );
     assert_eq!(
         control.current_completion_receipt(agent_id),
         Some(AgentStatus::Completed(Some("second".into())))
@@ -3854,8 +3895,16 @@ fn cancelling_latest_generation_restores_previous_receipt() {
     let control = AgentControl::default();
     let agent_id = ThreadId::new();
 
-    let _first = control.reserve_agent_generation(agent_id);
-    control.record_completion_delivery(agent_id, AgentStatus::Completed(Some("first".into())));
+    let first = control.reserve_agent_generation(agent_id);
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Deliver(generation) if generation == first
+    ));
+    control.record_completion_delivery(
+        agent_id,
+        first,
+        AgentStatus::Completed(Some("first".into())),
+    );
     let second = control.reserve_agent_generation(agent_id);
     assert_eq!(control.current_completion_receipt(agent_id), None);
 
@@ -3877,8 +3926,90 @@ fn cancelling_generation_suppresses_exactly_one_late_completion() {
     control.cleanup_rolled_back_agent(parent_id, agent_id, Some(generation));
 
     assert!(control.blocking_agent_targets(parent_id).is_empty());
-    assert!(!control.should_deliver_completion(agent_id));
-    assert!(control.should_deliver_completion(agent_id));
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Suppressed
+    ));
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Untracked
+    ));
+}
+
+#[test]
+fn rolling_back_queued_followup_suppresses_its_own_completion() {
+    let control = AgentControl::default();
+    let parent_id = ThreadId::new();
+    let agent_id = ThreadId::new();
+
+    let active_generation = control.reserve_agent_generation(agent_id);
+    let queued_generation = control.reserve_agent_generation(agent_id);
+    control.cleanup_rolled_back_agent(parent_id, agent_id, Some(queued_generation));
+
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Deliver(generation) if generation == active_generation
+    ));
+    control.record_completion_delivery(
+        agent_id,
+        active_generation,
+        AgentStatus::Completed(Some("active".into())),
+    );
+    assert_eq!(
+        control.current_completion_receipt(agent_id),
+        Some(AgentStatus::Completed(Some("active".into())))
+    );
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Suppressed
+    ));
+    assert!(queued_generation > active_generation);
+}
+
+#[test]
+fn shutdown_suppresses_the_active_generation_before_queued_followups() {
+    let control = AgentControl::default();
+    let agent_id = ThreadId::new();
+
+    let active_generation = control.reserve_agent_generation(agent_id);
+    let queued_generation = control.reserve_agent_generation(agent_id);
+
+    assert_eq!(
+        control.suppress_current_generation(agent_id),
+        Some(active_generation)
+    );
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Suppressed
+    ));
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Deliver(generation) if generation == queued_generation
+    ));
+}
+
+#[test]
+fn rollback_after_completion_claim_keeps_the_claimed_receipt_current() {
+    let control = AgentControl::default();
+    let parent_id = ThreadId::new();
+    let agent_id = ThreadId::new();
+
+    let generation = control.reserve_agent_generation(agent_id);
+    assert!(matches!(
+        control.claim_completion_delivery(agent_id),
+        CompletionDeliveryClaim::Deliver(claimed) if claimed == generation
+    ));
+    control.cleanup_rolled_back_agent(parent_id, agent_id, Some(generation));
+    control.record_completion_delivery(
+        agent_id,
+        generation,
+        AgentStatus::Completed(Some("claimed".into())),
+    );
+
+    assert_eq!(
+        control.current_completion_receipt(agent_id),
+        Some(AgentStatus::Completed(Some("claimed".into())))
+    );
 }
 
 #[test]

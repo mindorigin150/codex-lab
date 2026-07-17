@@ -49,6 +49,7 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use self::barrier::BlockingBarriers;
+pub(crate) use self::barrier::CompletionDeliveryClaim;
 use self::barrier::CompletionReceipts;
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
@@ -665,21 +666,34 @@ impl AgentControl {
         session_source: Option<&SessionSource>,
     ) -> Option<TurnEnvironmentSnapshot> {
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
-        })) = session_source
+            mut parent_thread_id,
+            ..
+        })) = session_source.cloned()
         else {
             return None;
         };
 
-        let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
-        Some(
-            parent_thread
-                .session
-                .services
-                .turn_environments
-                .snapshot()
-                .await,
-        )
+        loop {
+            if let Ok(parent_thread) = state.get_thread(parent_thread_id).await {
+                return Some(
+                    parent_thread
+                        .session
+                        .services
+                        .turn_environments
+                        .snapshot()
+                        .await,
+                );
+            }
+            parent_thread_id = state
+                .read_stored_thread(ReadThreadParams {
+                    thread_id: parent_thread_id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await
+                .ok()?
+                .parent_thread_id?;
+        }
     }
 
     async fn inherited_exec_policy_for_source(
@@ -689,19 +703,32 @@ impl AgentControl {
         child_config: &Config,
     ) -> Option<Arc<crate::exec_policy::ExecPolicyManager>> {
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
-        })) = session_source
+            mut parent_thread_id,
+            ..
+        })) = session_source.cloned()
         else {
             return None;
         };
 
-        let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
-        let parent_config = parent_thread.session.get_config().await;
-        if !crate::exec_policy::child_uses_parent_exec_policy(&parent_config, child_config) {
-            return None;
+        loop {
+            if let Ok(parent_thread) = state.get_thread(parent_thread_id).await {
+                let parent_config = parent_thread.session.get_config().await;
+                return crate::exec_policy::child_uses_parent_exec_policy(
+                    &parent_config,
+                    child_config,
+                )
+                .then(|| Arc::clone(&parent_thread.session.services.exec_policy));
+            }
+            parent_thread_id = state
+                .read_stored_thread(ReadThreadParams {
+                    thread_id: parent_thread_id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await
+                .ok()?
+                .parent_thread_id?;
         }
-
-        Some(Arc::clone(&parent_thread.session.services.exec_policy))
     }
 
     async fn open_thread_spawn_children(

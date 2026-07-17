@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib.metadata
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -35,22 +33,13 @@ def _snapshot_targets(root: Path) -> dict[str, dict[str, bytes] | bytes | None]:
 
 
 def test_generated_files_are_up_to_date():
-    """Regenerating from the pinned runtime package should leave artifacts unchanged."""
+    """Regenerating from the checkout schemas should leave artifacts unchanged."""
     before = _snapshot_targets(ROOT)
-
-    # Regenerate contract artifacts via the pinned runtime package, not a local
-    # app-server binary from the checkout or CI environment.
-    assert importlib.metadata.version("openai-codex-cli-bin") == "0.144.4"
-    env = os.environ.copy()
-    env.pop("CODEX_EXEC_PATH", None)
-    python_bin = str(Path(sys.executable).parent)
-    env["PATH"] = f"{python_bin}{os.pathsep}{env.get('PATH', '')}"
 
     subprocess.run(
         [sys.executable, "scripts/update_sdk_artifacts.py", "generate-types"],
         cwd=ROOT,
         check=True,
-        env=env,
     )
 
     after = _snapshot_targets(ROOT)

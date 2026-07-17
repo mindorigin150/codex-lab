@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -69,6 +70,14 @@ pub(crate) struct OutputHandles {
     pub(crate) cancellation_token: CancellationToken,
 }
 
+pub(super) struct InteractionLease(Arc<AtomicUsize>);
+
+impl Drop for InteractionLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 struct LocalOutputTaskHandles {
     buffer: OutputBuffer,
     output_notify: Arc<Notify>,
@@ -95,6 +104,8 @@ pub(crate) struct UnifiedExecProcess {
     output_closed_notify: Arc<Notify>,
     cancellation_token: CancellationToken,
     output_drained: Arc<Notify>,
+    interaction_lock: Arc<Mutex<()>>,
+    interaction_leases: Arc<AtomicUsize>,
     state_tx: watch::Sender<ProcessState>,
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
@@ -138,6 +149,8 @@ impl UnifiedExecProcess {
             output_closed_notify,
             cancellation_token,
             output_drained,
+            interaction_lock: Arc::new(Mutex::new(())),
+            interaction_leases: Arc::new(AtomicUsize::new(0)),
             state_tx,
             state_rx,
             output_task: None,
@@ -192,6 +205,19 @@ impl UnifiedExecProcess {
 
     pub(super) fn output_drained_notify(&self) -> Arc<Notify> {
         Arc::clone(&self.output_drained)
+    }
+
+    pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.interaction_lock)
+    }
+
+    pub(super) fn begin_interaction(&self) -> InteractionLease {
+        self.interaction_leases.fetch_add(1, Ordering::AcqRel);
+        InteractionLease(Arc::clone(&self.interaction_leases))
+    }
+
+    pub(super) fn has_pending_interaction(&self) -> bool {
+        self.interaction_leases.load(Ordering::Acquire) != 0
     }
 
     pub(super) fn has_exited(&self) -> bool {

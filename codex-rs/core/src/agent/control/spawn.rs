@@ -1,9 +1,47 @@
 use super::residency::is_v2_resident_session_source;
 use super::*;
+use crate::agent::role::apply_role_to_config;
 use codex_extension_api::ExtensionDataInit;
+use codex_sandboxing::policy_transforms::intersect_runtime_permission_profiles;
 use std::collections::VecDeque;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
+
+async fn apply_v2_reload_role(
+    config: &mut Config,
+    session_source: &SessionSource,
+) -> CodexResult<()> {
+    let Some(role_name) = session_source.get_agent_role() else {
+        return Ok(());
+    };
+    let runtime_approval_policy = config.permissions.approval_policy.value();
+    let runtime_approvals_reviewer = config.approvals_reviewer;
+    let runtime_cwd = config.cwd.clone();
+    let parent_permission_profile = config.permissions.effective_permission_profile();
+    let parent_network_proxy = config.permissions.network.clone();
+
+    apply_role_to_config(config, Some(&role_name))
+        .await
+        .map_err(CodexErr::InvalidRequest)?;
+    config
+        .permissions
+        .approval_policy
+        .set(runtime_approval_policy)
+        .map_err(|err| CodexErr::InvalidRequest(format!("approval_policy is invalid: {err}")))?;
+    config.approvals_reviewer = runtime_approvals_reviewer;
+    config.cwd = runtime_cwd;
+    let permission_profile = intersect_runtime_permission_profiles(
+        config.permissions.effective_permission_profile(),
+        parent_permission_profile,
+        config.cwd.as_path(),
+    );
+    config.permissions.network = parent_network_proxy;
+    config
+        .permissions
+        .set_permission_profile(permission_profile)
+        .map_err(|err| CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}")))?;
+    Ok(())
+}
 
 struct SpawnAgentThreadInheritance {
     environments: Option<TurnEnvironmentSnapshot>,
@@ -270,7 +308,7 @@ impl AgentControl {
 
     pub(crate) async fn ensure_v2_agent_loaded(
         &self,
-        config: Config,
+        mut config: Config,
         thread_id: ThreadId,
     ) -> CodexResult<()> {
         let state = self.upgrade()?;
@@ -302,16 +340,21 @@ impl AgentControl {
         if initial_history.get_multi_agent_version() != Some(MultiAgentVersion::V2) {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
-        let residency_slot = self
-            .reserve_v2_residency_slot(&state, &config, Some(thread_id))
-            .await?;
-
         let (session_source, _) = initial_history
             .get_resumed_session_sources()
             .unwrap_or((stored_source, None));
         let parent_thread_id = initial_history
             .get_resumed_parent_thread_id()
-            .or(stored_parent_thread_id);
+            .or(stored_parent_thread_id)
+            .ok_or(CodexErr::ThreadNotFound(thread_id))?;
+        config =
+            Box::pin(self.build_v2_agent_reload_config(&state, config, parent_thread_id)).await?;
+        config.base_instructions = None;
+        apply_v2_reload_role(&mut config, &session_source).await?;
+        let residency_slot = self
+            .reserve_v2_residency_slot(&state, &config, Some(thread_id))
+            .await?;
+
         let inherited_environments = self
             .inherited_environments_for_source(&state, Some(&session_source))
             .await;
@@ -325,7 +368,7 @@ impl AgentControl {
                 initial_history,
                 agent_control: self.clone(),
                 session_source,
-                parent_thread_id,
+                parent_thread_id: Some(parent_thread_id),
                 inherited_environments,
                 inherited_exec_policy,
             })
@@ -345,6 +388,102 @@ impl AgentControl {
                 Err(err)
             }
         }
+    }
+
+    async fn build_v2_agent_reload_config(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        mut config: Config,
+        thread_id: ThreadId,
+    ) -> CodexResult<Config> {
+        if let Ok(thread) = state.get_thread(thread_id).await {
+            return Ok((*thread.config().await).clone());
+        }
+
+        let stored_thread = state
+            .read_stored_thread(ReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await?;
+        let stored_source = stored_thread.source.clone();
+        let stored_parent_thread_id = stored_thread.parent_thread_id;
+        let history = load_agent_model_context(state, thread_id, stored_thread.history_mode)
+            .await?
+            .ok_or(CodexErr::ThreadNotFound(thread_id))?;
+        let initial_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: thread_id,
+            history: Arc::new(history),
+            rollout_path: stored_thread.rollout_path,
+        });
+        let (session_source, _) = initial_history
+            .get_resumed_session_sources()
+            .unwrap_or((stored_source, None));
+        let parent_thread_id = initial_history
+            .get_resumed_parent_thread_id()
+            .or(stored_parent_thread_id);
+
+        if let Some(parent_thread_id) = parent_thread_id {
+            config = Box::pin(self.build_v2_agent_reload_config(state, config, parent_thread_id))
+                .await?;
+        } else {
+            let latest_thread_settings =
+                initial_history
+                    .get_rollout_items()
+                    .iter()
+                    .rev()
+                    .find_map(|item| match item {
+                        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                            Some(&event.thread_settings)
+                        }
+                        _ => None,
+                    });
+            let latest_turn_context =
+                initial_history
+                    .get_rollout_items()
+                    .iter()
+                    .rev()
+                    .find_map(|item| match item {
+                        RolloutItem::TurnContext(turn_context) => Some(turn_context),
+                        _ => None,
+                    });
+            config.model = stored_thread.model;
+            config.model_provider_id = stored_thread.model_provider.clone();
+            config.model_provider = config.model_providers[&stored_thread.model_provider].clone();
+            config.model_reasoning_effort = stored_thread.reasoning_effort;
+            config.cwd =
+                codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(stored_thread.cwd)
+                    .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
+            config
+                .permissions
+                .approval_policy
+                .set(stored_thread.approval_mode)
+                .map_err(|err| {
+                    CodexErr::InvalidRequest(format!("approval_policy is invalid: {err}"))
+                })?;
+            config
+                .permissions
+                .set_permission_profile(stored_thread.permission_profile)
+                .map_err(|err| {
+                    CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
+                })?;
+            if let Some(thread_settings) = latest_thread_settings {
+                config
+                    .service_tier
+                    .clone_from(&thread_settings.service_tier);
+                config.approvals_reviewer = thread_settings.approvals_reviewer;
+            }
+            if let Some(workspace_roots) =
+                latest_turn_context.and_then(|turn_context| turn_context.workspace_roots.clone())
+            {
+                config.workspace_roots.clone_from(&workspace_roots);
+                config.permissions.set_workspace_roots(workspace_roots);
+            }
+        }
+        config.base_instructions = None;
+        apply_v2_reload_role(&mut config, &session_source).await?;
+        Ok(config)
     }
 
     async fn spawn_agent_internal(

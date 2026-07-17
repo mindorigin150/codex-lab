@@ -5,7 +5,6 @@ use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::EXPLORER_ROLE_NAME;
 use crate::agent::role::REVIEWER_ROLE_NAME;
-use crate::agent::role::apply_role_to_config;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
@@ -130,10 +129,9 @@ async fn prepare_spawn_agent(
         args.reasoning_effort.clone(),
     )
     .await?;
-    apply_role_to_config(&mut config, Some(role_name))
-        .await
-        .map_err(FunctionCallError::RespondToModel)?;
-    if validate_effective_model_overrides {
+    let model_before_role = config.model.clone();
+    apply_spawn_agent_role(session, &mut config, Some(role_name)).await?;
+    if validate_effective_model_overrides || config.model != model_before_role {
         validate_effective_spawn_agent_model_overrides(session, turn.as_ref(), &config).await?;
     }
     apply_spawn_agent_service_tier(

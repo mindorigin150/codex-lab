@@ -13,6 +13,7 @@ use std::time::UNIX_EPOCH;
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
 use crate::agent::agent_status_from_event;
+use crate::agent::control::CompletionDeliveryClaim;
 use crate::agent::status::is_final;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
@@ -1812,25 +1813,46 @@ impl Session {
             return;
         }
 
-        if !self
+        let completion_generation = match self
             .services
             .agent_control
-            .should_deliver_completion(self.thread_id)
+            .claim_completion_delivery(self.thread_id)
         {
-            debug!(
-                child_thread_id = %self.thread_id,
-                "suppressed completion notification for a rolled-back agent generation"
+            CompletionDeliveryClaim::Deliver(generation) => Some(generation),
+            CompletionDeliveryClaim::Suppressed => {
+                debug!(
+                    child_thread_id = %self.thread_id,
+                    "suppressed completion notification for a rolled-back agent generation"
+                );
+                return;
+            }
+            CompletionDeliveryClaim::Untracked => None,
+        };
+        let delivery = self
+            .forward_child_completion_to_parent(
+                turn_context,
+                *parent_thread_id,
+                child_agent_path,
+                status.clone(),
+            )
+            .await;
+        if let Some(generation) = completion_generation {
+            let receipt_status = match delivery {
+                Ok(()) => status,
+                Err(err) => {
+                    let failed_status = AgentStatus::Errored(format!(
+                        "failed to deliver completion to parent: {err}"
+                    ));
+                    self.agent_status.send_replace(failed_status.clone());
+                    failed_status
+                }
+            };
+            self.services.agent_control.record_completion_delivery(
+                self.thread_id,
+                generation,
+                receipt_status,
             );
-            return;
         }
-
-        self.forward_child_completion_to_parent(
-            turn_context,
-            *parent_thread_id,
-            child_agent_path,
-            status,
-        )
-        .await;
     }
 
     /// Sends the standard completion envelope from a spawned MultiAgentV2 child to its parent.
@@ -1840,13 +1862,13 @@ impl Session {
         parent_thread_id: ThreadId,
         child_agent_path: &codex_protocol::AgentPath,
         status: AgentStatus,
-    ) {
+    ) -> Result<(), String> {
         let Some(parent_agent_path) = child_agent_path
             .as_str()
             .rsplit_once('/')
             .and_then(|(parent, _)| codex_protocol::AgentPath::try_from(parent).ok())
         else {
-            return;
+            return Err("child agent path has no parent".to_string());
         };
 
         let Some(message) = format_inter_agent_completion_message(
@@ -1854,7 +1876,7 @@ impl Session {
             child_agent_path.clone(),
             &status,
         ) else {
-            return;
+            return Err("terminal status has no completion message".to_string());
         };
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
@@ -1879,11 +1901,8 @@ impl Session {
             .await
         {
             debug!("failed to notify parent thread {parent_thread_id}: {err}");
-            return;
+            return Err(err.to_string());
         }
-        self.services
-            .agent_control
-            .record_completion_delivery(self.thread_id, status.clone());
         if let Some(message) = trace_message {
             self.services
                 .rollout_thread_trace
@@ -1897,6 +1916,7 @@ impl Session {
                     },
                 );
         }
+        Ok(())
     }
 
     async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {
@@ -2445,8 +2465,7 @@ impl Session {
         let turn_environment = match args.environment_id.as_deref() {
             Some(environment_id) => turn_context
                 .environments
-                .turn_environments
-                .iter()
+                .turn_environments()
                 .find(|environment| environment.environment_id == environment_id),
             None => turn_context.environments.primary(),
         };
@@ -2865,22 +2884,12 @@ impl Session {
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
     ) -> Arc<StepContext> {
-        let deferred_executor_enabled = turn_context
-            .config
-            .features
-            .enabled(Feature::DeferredExecutor);
-        // Keep the old turn-frozen environment view unless deferred executors are enabled.
-        let environments = if deferred_executor_enabled {
-            self.services.turn_environments.snapshot().await
-        } else {
-            turn_context.environments.clone()
-        };
-        if deferred_executor_enabled {
-            self.services
-                .agents_md_manager
-                .refresh(&turn_context.config, &environments)
-                .await;
-        }
+        // Keep selections fixed for the turn while allowing their startup work to finish.
+        let environments = turn_context.environments.refresh_readiness();
+        self.services
+            .agents_md_manager
+            .refresh(&turn_context.config, &environments)
+            .await;
         let loaded_agents_md = self.services.agents_md_manager.get_loaded().await;
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&environments)

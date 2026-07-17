@@ -18,7 +18,12 @@ struct CompletionProgress {
     pending_generations: VecDeque<u64>,
     delivered: Option<(u64, AgentStatus)>,
     cancelled_generations: HashSet<u64>,
-    suppressed_completions: VecDeque<u64>,
+}
+
+pub(crate) enum CompletionDeliveryClaim {
+    Deliver(u64),
+    Suppressed,
+    Untracked,
 }
 
 #[derive(Default)]
@@ -47,19 +52,6 @@ impl AgentControl {
     }
 
     pub(super) fn cancel_agent_generation(&self, agent_id: ThreadId, generation: u64) {
-        self.remove_agent_generation(agent_id, generation, /*suppress_completion*/ false);
-    }
-
-    fn suppress_agent_generation(&self, agent_id: ThreadId, generation: u64) {
-        self.remove_agent_generation(agent_id, generation, /*suppress_completion*/ true);
-    }
-
-    fn remove_agent_generation(
-        &self,
-        agent_id: ThreadId,
-        generation: u64,
-        suppress_completion: bool,
-    ) {
         let mut receipts = self
             .completion_receipts
             .0
@@ -68,18 +60,42 @@ impl AgentControl {
         let Some(progress) = receipts.get_mut(&agent_id) else {
             return;
         };
-        let was_pending = progress.pending_generations.contains(&generation);
         progress
             .pending_generations
             .retain(|pending| *pending != generation);
-        if was_pending && suppress_completion {
-            progress.cancelled_generations.insert(generation);
-            progress.suppressed_completions.push_back(generation);
-        }
         if progress.current_generation == generation {
             progress.current_generation = progress
                 .pending_generations
                 .back()
+                .copied()
+                .or_else(|| progress.delivered.as_ref().map(|(delivered, _)| *delivered))
+                .unwrap_or_default();
+        }
+    }
+
+    fn suppress_agent_generation(&self, agent_id: ThreadId, generation: u64) {
+        let mut receipts = self
+            .completion_receipts
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(progress) = receipts.get_mut(&agent_id) else {
+            return;
+        };
+        Self::suppress_progress_generation(progress, generation);
+    }
+
+    fn suppress_progress_generation(progress: &mut CompletionProgress, generation: u64) {
+        if !progress.pending_generations.contains(&generation) {
+            return;
+        }
+        progress.cancelled_generations.insert(generation);
+        if progress.current_generation == generation {
+            progress.current_generation = progress
+                .pending_generations
+                .iter()
+                .rev()
+                .find(|pending| !progress.cancelled_generations.contains(pending))
                 .copied()
                 .or_else(|| progress.delivered.as_ref().map(|(delivered, _)| *delivered))
                 .unwrap_or_default();
@@ -100,27 +116,35 @@ impl AgentControl {
     /// Tombstone the currently active generation so shutdown/rollback cannot deliver its late
     /// terminal notification to the parent. Returns the generation that was suppressed.
     pub(crate) fn suppress_current_generation(&self, agent_id: ThreadId) -> Option<u64> {
-        let generation = self.current_agent_generation(agent_id)?;
-        self.suppress_agent_generation(agent_id, generation);
+        let mut receipts = self
+            .completion_receipts
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let progress = receipts.get_mut(&agent_id)?;
+        let generation = progress.pending_generations.front().copied()?;
+        Self::suppress_progress_generation(progress, generation);
         Some(generation)
     }
 
-    /// Returns false when rollback cancelled the generation whose terminal notification is next.
-    /// The cancelled receipt is consumed here so a later generation can still complete normally.
-    pub(crate) fn should_deliver_completion(&self, agent_id: ThreadId) -> bool {
+    /// Claims the next generation before parent delivery begins. Rollback and shutdown are
+    /// linearized against this claim, so they cannot tombstone a different in-flight generation.
+    pub(crate) fn claim_completion_delivery(&self, agent_id: ThreadId) -> CompletionDeliveryClaim {
         let mut receipts = self
             .completion_receipts
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(progress) = receipts.get_mut(&agent_id) else {
-            return true;
+            return CompletionDeliveryClaim::Untracked;
         };
-        let Some(generation) = progress.suppressed_completions.pop_front() else {
-            return true;
+        let Some(generation) = progress.pending_generations.pop_front() else {
+            return CompletionDeliveryClaim::Untracked;
         };
-        progress.cancelled_generations.remove(&generation);
-        false
+        if progress.cancelled_generations.remove(&generation) {
+            return CompletionDeliveryClaim::Suppressed;
+        }
+        CompletionDeliveryClaim::Deliver(generation)
     }
 
     pub(crate) fn cleanup_rolled_back_agent(
@@ -135,17 +159,18 @@ impl AgentControl {
         self.settle_blocking_agents(parent_thread_id, &[agent_id], /*failed*/ false);
     }
 
-    pub(crate) fn record_completion_delivery(&self, agent_id: ThreadId, status: AgentStatus) {
+    pub(crate) fn record_completion_delivery(
+        &self,
+        agent_id: ThreadId,
+        generation: u64,
+        status: AgentStatus,
+    ) {
         let mut receipts = self
             .completion_receipts
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let progress = receipts.entry(agent_id).or_default();
-        let Some(generation) = progress.pending_generations.pop_front() else {
-            tracing::warn!(%agent_id, "completion delivered without a pending agent generation");
-            return;
-        };
         progress.delivered = Some((generation, status));
     }
 
