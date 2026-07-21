@@ -1,5 +1,9 @@
 use anyhow::Result;
+use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
@@ -12,9 +16,10 @@ use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::turn_permission_fields;
+use core_test_support::wait_for_event;
 use serde_json::Value;
 use serde_json::json;
-use std::sync::Arc;
 use std::time::Duration;
 
 const PARENT_PROMPT: &str = "delegate this investigation to an explorer";
@@ -131,6 +136,14 @@ async fn parent_automatically_waits_for_explorer_final_answer_before_sampling() 
             config.model_provider.request_max_retries = Some(0);
             config.model_provider.stream_max_retries = Some(0);
             config.model_provider.supports_websockets = false;
+            config.agent_roles.insert(
+                "explorer".to_string(),
+                AgentRoleConfig {
+                    description: Some("Read-heavy test role".to_string()),
+                    config_file: None,
+                    nickname_candidates: None,
+                },
+            );
             config.multi_agent_v2.min_wait_timeout_ms = 10;
             config.multi_agent_v2.default_wait_timeout_ms = 50;
             config.multi_agent_v2.max_wait_timeout_ms = 1_000;
@@ -209,43 +222,66 @@ async fn user_input_temporarily_releases_the_explorer_barrier_without_cancelling
     )
     .await;
 
-    let test = Arc::new(
-        test_codex()
-            .with_model("koffing")
-            .with_config(|config| {
-                config
-                    .features
-                    .enable(Feature::Collab)
-                    .expect("test config should allow feature update");
-                config
-                    .features
-                    .enable(Feature::MultiAgentV2)
-                    .expect("test config should allow feature update");
-                config.model_provider.request_max_retries = Some(0);
-                config.model_provider.stream_max_retries = Some(0);
-                config.model_provider.supports_websockets = false;
-                config.multi_agent_v2.min_wait_timeout_ms = 10;
-                config.multi_agent_v2.default_wait_timeout_ms = 50;
-                config.multi_agent_v2.max_wait_timeout_ms = 1_000;
-            })
-            .build(&server)
-            .await?,
-    );
-    let turn = tokio::spawn({
-        let test = Arc::clone(&test);
-        async move { test.submit_turn(INITIAL_PROMPT).await }
-    });
+    let test = test_codex()
+        .with_model("koffing")
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
+            config.agent_roles.insert(
+                "explorer".to_string(),
+                AgentRoleConfig {
+                    description: Some("Read-heavy test role".to_string()),
+                    config_file: None,
+                    nickname_candidates: None,
+                },
+            );
+            config.multi_agent_v2.min_wait_timeout_ms = 10;
+            config.multi_agent_v2.default_wait_timeout_ms = 50;
+            config.multi_agent_v2.max_wait_timeout_ms = 1_000;
+        })
+        .build(&server)
+        .await?;
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: INITIAL_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
+                    mode: codex_protocol::config_types::ModeKind::Default,
+                    settings: codex_protocol::config_types::Settings {
+                        model: test.session_configured.model.clone(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            },
+        })
+        .await?;
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if !child.requests().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::CollabWaitingBegin(_))
     })
-    .await
-    .map_err(|_| anyhow::anyhow!("explorer did not start before steered input"))?;
+    .await;
     test.codex
         .steer_input(
             vec![UserInput::Text {
@@ -277,6 +313,10 @@ async fn user_input_temporarily_releases_the_explorer_barrier_without_cancelling
         "parent should handle the steered input before child completion"
     );
     test.codex.submit(Op::Interrupt).await?;
-    let _ = turn.await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
+    test.codex.shutdown_and_wait().await?;
     Ok(())
 }

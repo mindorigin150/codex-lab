@@ -4969,6 +4969,21 @@ pub(crate) fn thread_from_stored_thread(
     fallback_provider: &str,
     fallback_cwd: &AbsolutePathBuf,
 ) -> (Thread, Option<codex_thread_store::StoredThreadHistory>) {
+    let multi_agent_version = thread.history.as_ref().and_then(|history| {
+        // Match InitialHistory::get_multi_agent_version without cloning the stored history.
+        let session_meta_version = history.items.iter().rev().find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) if meta.meta.id == history.thread_id => {
+                meta.meta.multi_agent_version
+            }
+            _ => None,
+        });
+        session_meta_version.or_else(|| {
+            history.items.iter().rev().find_map(|item| match item {
+                RolloutItem::TurnContext(turn_context) => turn_context.multi_agent_version,
+                _ => None,
+            })
+        })
+    });
     let path = thread.rollout_path;
     let git_info = thread.git_info.map(|info| ApiGitInfo {
         sha: info.commit_hash.map(|sha| sha.0),
@@ -4987,6 +5002,8 @@ pub(crate) fn thread_from_stored_thread(
         thread.agent_nickname.clone(),
         thread.agent_role.clone(),
     );
+    let can_accept_direct_input =
+        multi_agent_version.map(|version| can_accept_direct_input(Some(version), &source));
     let history = thread.history;
     let thread_id = thread.thread_id.to_string();
     let thread = Thread {
@@ -5014,7 +5031,7 @@ pub(crate) fn thread_from_stored_thread(
         agent_nickname: source.get_nickname(),
         agent_role: source.get_agent_role(),
         source: source.into(),
-        can_accept_direct_input: None,
+        can_accept_direct_input,
         thread_source: thread.thread_source.map(Into::into),
         git_info,
         name: thread.name,

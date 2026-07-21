@@ -445,11 +445,7 @@ async fn response_item_ids_persist_across_resume_and_preserve_server_ids() -> an
         .expect("rollout path");
 
     initial.submit_turn("before resume").await?;
-    initial.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&initial.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
+    initial.codex.shutdown_and_wait().await?;
 
     builder = builder.with_config(|config| {
         let _ = config.features.enable(Feature::ItemIds);
@@ -540,11 +536,7 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
         .await?;
 
     first.submit_turn("first resume").await?;
-    first.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&first.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
+    first.codex.shutdown_and_wait().await?;
     assert!(
         !std::fs::read_to_string(&session_path)?.contains("\"type\":\"function_call_output\""),
         "prompt-only repair should not be persisted to the rollout"

@@ -2301,7 +2301,7 @@ async fn remote_compact_trim_estimate_uses_session_base_instructions() -> Result
     let override_base_instructions = format!(
         "{}\nREMOTE_BASE_INSTRUCTIONS_OVERRIDE {}",
         baseline_compact_request.instructions_text(),
-        "x".repeat(8_000)
+        "x".repeat(24_000)
     );
     let override_context_window = baseline_payload_tokens.saturating_add(500);
     let pretrim_override_estimate =
@@ -2788,11 +2788,7 @@ async fn remote_compact_and_resume_refresh_stale_developer_instructions() -> Res
         .await?;
     wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    initial.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&initial.codex, |ev| {
-        matches!(ev, EventMsg::ShutdownComplete)
-    })
-    .await;
+    initial.codex.shutdown_and_wait().await?;
 
     let mut resume_builder =
         test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
@@ -3125,11 +3121,7 @@ async fn active_realtime_does_not_diff_changed_start_instructions_after_resume()
     start_realtime_conversation(initial.codex.as_ref()).await?;
     initial.submit_turn("USER_ONE").await?;
     close_realtime_conversation(initial.codex.as_ref()).await?;
-    initial.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&initial.codex, |ev| {
-        matches!(ev, EventMsg::ShutdownComplete)
-    })
-    .await;
+    initial.codex.shutdown_and_wait().await?;
     initial_realtime_server.shutdown().await;
 
     let resumed_realtime_server = start_remote_realtime_server().await;

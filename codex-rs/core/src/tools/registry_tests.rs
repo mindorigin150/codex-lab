@@ -357,7 +357,10 @@ async fn code_mode_rejects_tools_with_encrypted_parameters_before_dispatch() {
         runtime_tool_call_id: "tool-1".to_string(),
     };
 
-    let err = match registry.dispatch_any(invocation).await {
+    let err = match registry
+        .dispatch_any_with_terminal_outcome(invocation, /*terminal_outcome_reached*/ None)
+        .await
+    {
         Ok(_) => panic!("encrypted Code Mode call should be rejected"),
         Err(err) => err,
     };

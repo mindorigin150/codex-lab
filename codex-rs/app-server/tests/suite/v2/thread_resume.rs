@@ -3081,12 +3081,6 @@ async fn thread_resume_keeps_in_flight_turn_streaming() -> Result<()> {
     .await??;
     primary.clear_message_buffer();
 
-    let mut secondary = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build()
-        .await?;
-    timeout(DEFAULT_READ_TIMEOUT, secondary.initialize()).await??;
-
     let turn_id = primary
         .send_turn_start_request(TurnStartParams {
             thread_id: thread.id.clone(),
@@ -3109,7 +3103,7 @@ async fn thread_resume_keeps_in_flight_turn_streaming() -> Result<()> {
     )
     .await??;
 
-    let resume_id = secondary
+    let resume_id = primary
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread.id,
             ..Default::default()
@@ -3117,7 +3111,7 @@ async fn thread_resume_keeps_in_flight_turn_streaming() -> Result<()> {
         .await?;
     let resume_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
-        secondary.read_stream_until_response_message(RequestId::Integer(resume_id)),
+        primary.read_stream_until_response_message(RequestId::Integer(resume_id)),
     )
     .await??;
     let ThreadResumeResponse {
@@ -3651,13 +3645,7 @@ async fn thread_resume_can_skip_turns_when_thread_is_running() -> Result<()> {
     )
     .await??;
 
-    let mut secondary = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build()
-        .await?;
-    timeout(DEFAULT_READ_TIMEOUT, secondary.initialize()).await??;
-
-    let resume_id = secondary
+    let resume_id = primary
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread.id.clone(),
             exclude_turns: true,
@@ -3666,7 +3654,7 @@ async fn thread_resume_can_skip_turns_when_thread_is_running() -> Result<()> {
         .await?;
     let resume_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
-        secondary.read_stream_until_response_message(RequestId::Integer(resume_id)),
+        primary.read_stream_until_response_message(RequestId::Integer(resume_id)),
     )
     .await??;
     let ThreadResumeResponse {

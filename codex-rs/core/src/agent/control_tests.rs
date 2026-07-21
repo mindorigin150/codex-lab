@@ -202,8 +202,8 @@ impl AgentControlHarness {
                     depth: 1,
                     agent_path: None,
                     agent_nickname: None,
-                    agent_role: None,
-                    agent_role_provenance: None,
+                    agent_role: Some("default".to_string()),
+                    agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
                 })),
                 options,
             )
@@ -660,8 +660,8 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
                 depth: 1,
                 agent_path: Some(agent_path.clone()),
                 agent_nickname: None,
-                agent_role: None,
-                agent_role_provenance: None,
+                agent_role: Some("default".to_string()),
+                agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
             })),
             SpawnAgentOptions {
                 parent_thread_id: Some(parent_thread_id),
@@ -2168,11 +2168,13 @@ async fn spawn_agent_respects_legacy_max_threads_alias() {
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+    let state_db = init_state_db(&config).await;
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        state_db,
     );
     let control = manager.agent_control();
 
@@ -2220,11 +2222,13 @@ async fn spawn_agent_releases_slot_after_shutdown() {
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+    let state_db = init_state_db(&config).await;
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        state_db,
     );
     let control = manager.agent_control();
 
@@ -2263,11 +2267,13 @@ async fn spawn_agent_limit_shared_across_clones() {
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+    let state_db = init_state_db(&config).await;
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        state_db,
     );
     let control = manager.agent_control();
     let cloned = control.clone();
@@ -2308,11 +2314,13 @@ async fn resume_agent_respects_max_threads_limit() {
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+    let state_db = init_state_db(&config).await;
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        state_db,
     );
     let control = manager.agent_control();
 
@@ -2364,11 +2372,13 @@ async fn resume_agent_releases_slot_after_resume_failure() {
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+    let state_db = init_state_db(&config).await;
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        state_db,
     );
     let control = manager.agent_control();
 

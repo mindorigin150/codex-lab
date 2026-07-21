@@ -44,6 +44,8 @@ pub(crate) struct Session {
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
+    #[cfg(test)]
+    pub(super) _test_codex_home: Option<tempfile::TempDir>,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -1169,6 +1171,8 @@ impl Session {
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
+                #[cfg(test)]
+                _test_codex_home: None,
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {

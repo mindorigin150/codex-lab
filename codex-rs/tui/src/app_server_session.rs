@@ -667,6 +667,7 @@ impl AppServerSession {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn fork_side_thread(
         &mut self,
         config: Config,

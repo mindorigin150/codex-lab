@@ -112,6 +112,17 @@ fn thread_manager() -> ThreadManager {
     )
 }
 
+async fn thread_manager_with_state(config: &crate::config::Config) -> ThreadManager {
+    let state_db = init_state_db(config).await;
+    ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        state_db,
+    )
+}
+
 async fn install_role_with_model_override(turn: &mut TurnContext) -> String {
     let role_name = "fork-context-role".to_string();
     tokio::fs::create_dir_all(&turn.config.codex_home)
@@ -510,11 +521,12 @@ async fn spawn_agent_fork_context_rejects_agent_type_override() {
 #[tokio::test]
 async fn spawn_agent_full_history_inherits_builtin_explorer_provenance() {
     let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
     let mut config = (*turn.config).clone();
     apply_role_to_config(&mut config, Some("explorer"))
         .await
         .expect("built-in explorer role");
+    config.agent_max_depth = 2;
+    let manager = thread_manager_with_state(&config).await;
     let root = manager
         .start_thread(config.clone())
         .await
@@ -1219,7 +1231,7 @@ service_tier = "turbo"
         },
     );
     turn.config = Arc::new(config);
-    let manager = thread_manager();
+    let manager = thread_manager_with_state(turn.config.as_ref()).await;
     let root = manager
         .start_thread((*turn.config).clone())
         .await
@@ -1255,11 +1267,11 @@ service_tier = "turbo"
     );
     assert_eq!(
         snapshot.session_source.get_agent_role().as_deref(),
-        Some("default")
+        Some("tiered-role")
     );
     assert_eq!(
         snapshot.session_source.get_agent_role_provenance(),
-        Some(AgentRoleProvenance::BuiltIn)
+        Some(AgentRoleProvenance::UserDefined)
     );
 }
 
@@ -1334,7 +1346,7 @@ async fn root_full_history_fork_uses_builtin_default_across_resume() {
         .agent_roles
         .insert("default".to_string(), custom_default);
     turn.config = Arc::new(config.clone());
-    let manager = thread_manager();
+    let manager = thread_manager_with_state(turn.config.as_ref()).await;
     let root = manager
         .start_thread((*turn.config).clone())
         .await
@@ -2255,7 +2267,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
 #[tokio::test]
 async fn multi_agent_v2_list_agents_omits_closed_agents() {
     let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
+    let manager = thread_manager_with_state(turn.config.as_ref()).await;
     let root = manager
         .start_thread((*turn.config).clone())
         .await
@@ -3386,7 +3398,7 @@ async fn resume_agent_noops_for_active_agent() {
 #[tokio::test]
 async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
     let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
+    let manager = thread_manager_with_state(turn.config.as_ref()).await;
     session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager
@@ -3915,7 +3927,7 @@ async fn wait_agent_returns_final_status_without_timeout() {
 #[tokio::test]
 async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
     let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
+    let manager = thread_manager_with_state(turn.config.as_ref()).await;
     let root = manager
         .start_thread((*turn.config).clone())
         .await

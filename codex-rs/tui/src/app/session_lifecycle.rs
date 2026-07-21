@@ -365,6 +365,9 @@ impl App {
                         "Agent thread {thread_id} is not yet available for replay or live attach."
                     ));
                 }
+                if thread_blocks_direct_input(&thread) {
+                    self.agent_navigation.mark_parent_owned(thread_id);
+                }
                 let mut session = self.session_state_for_thread_read(thread_id, &thread).await;
                 // `thread/read` can seed replay state, but it does not attach the app-server
                 // listener that `thread/resume` establishes, so treat this path as replay-only.

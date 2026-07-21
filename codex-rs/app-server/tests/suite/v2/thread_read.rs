@@ -1,6 +1,7 @@
 use anyhow::Result;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_paginated_rollout;
+use app_test_support::create_fake_rollout_with_source;
 use app_test_support::create_fake_rollout_with_text_elements;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::rollout_path;
@@ -60,12 +61,18 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::AgentRoleProvenance;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource as ProtocolSessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::ByteRange;
@@ -151,6 +158,86 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
     assert_eq!(thread.turns.len(), 0);
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_read_uses_turn_context_version_for_v2_subagent_input_capability() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let parent_thread_id = codex_protocol::ThreadId::new();
+    let filename_ts = "2025-01-05T12-00-00";
+    let conversation_id = create_fake_rollout_with_source(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-05T12:00:00Z",
+        "child history",
+        Some("mock_provider"),
+        /*git_info*/ None,
+        ProtocolSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: Some("child".to_string()),
+            agent_role: Some("worker".to_string()),
+            agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
+        }),
+    )?;
+    let turn_context = TurnContextItem {
+        turn_id: Some("turn-1".to_string()),
+        cwd: test_absolute_path("/"),
+        workspace_roots: None,
+        current_date: None,
+        timezone: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: None,
+        sandbox_policy: SandboxPolicy::DangerFullAccess,
+        permission_profile: None,
+        network: None,
+        file_system_sandbox_policy: None,
+        model: "mock-model".to_string(),
+        comp_hash: None,
+        personality: None,
+        collaboration_mode: None,
+        multi_agent_version: Some(MultiAgentVersion::V2),
+        multi_agent_mode: None,
+        realtime_active: None,
+        effort: None,
+        summary: codex_protocol::config_types::ReasoningSummary::Auto,
+    };
+    let path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": "2025-01-05T12:01:00Z",
+            "type": "turn_context",
+            "payload": serde_json::to_value(turn_context)?,
+        })
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: conversation_id,
+            include_turns: true,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread, .. } = to_response::<ThreadReadResponse>(read_resp)?;
+
+    assert_eq!(thread.can_accept_direct_input, Some(false));
     Ok(())
 }
 
@@ -534,6 +621,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
                 cwd: Some(codex_home.path().to_path_buf()),
                 model_provider: "mock_provider".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
+                collaboration_mode: None,
             },
         })
         .await?;

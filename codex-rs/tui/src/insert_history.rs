@@ -114,7 +114,7 @@ where
 {
     insert_history_rich_lines_with_mode_and_wrap_policy(
         terminal,
-        lines.into_iter().map(RichHistoryLine::plain).collect(),
+        lines.iter().cloned().map(RichHistoryLine::plain).collect(),
         mode,
         wrap_policy,
     )

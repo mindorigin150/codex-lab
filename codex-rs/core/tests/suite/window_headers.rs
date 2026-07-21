@@ -128,8 +128,7 @@ async fn submit_compact_turn(codex: &Arc<CodexThread>) -> Result<()> {
 }
 
 async fn shutdown_thread(codex: &Arc<CodexThread>) -> Result<()> {
-    codex.submit(Op::Shutdown).await?;
-    wait_for_event(codex, |event| matches!(event, EventMsg::ShutdownComplete)).await;
+    codex.shutdown_and_wait().await?;
     Ok(())
 }
 

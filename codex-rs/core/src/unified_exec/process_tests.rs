@@ -49,6 +49,7 @@ async fn local_pipe_artifact_captures_bytes_before_head_tail_omission() {
         temp_dir.path(),
         &HashMap::new(),
         &None,
+        /*inherited_fds*/ &[],
     )
     .await
     .expect("spawn local pipe process");
@@ -123,6 +124,7 @@ async fn local_early_sandbox_denial_carries_completed_artifact() {
         temp_dir.path(),
         &HashMap::new(),
         &None,
+        /*inherited_fds*/ &[],
     )
     .await
     .expect("spawn local pipe process");

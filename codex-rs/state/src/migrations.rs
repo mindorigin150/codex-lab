@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 
@@ -48,29 +49,58 @@ pub(crate) fn runtime_thread_history_migrator() -> Migrator {
     runtime_migrator(&THREAD_HISTORY_MIGRATOR)
 }
 
-pub(crate) async fn repair_legacy_recency_migration_version(
+#[cfg(test)]
+pub(crate) async fn repair_legacy_state_migration_versions(
     pool: &SqlitePool,
     migrator: &Migrator,
 ) -> anyhow::Result<()> {
-    let Some(recency_migration) = migrator
-        .migrations
-        .iter()
-        .find(|migration| migration.version == 39)
-    else {
-        return Ok(());
-    };
+    let mut connection = pool.acquire().await?;
+    repair_legacy_state_migration_versions_on_connection(&mut connection, migrator).await
+}
+
+pub(crate) async fn migrate_state_database(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    if let Some(migration) = migrator.migrations.iter().find(|migration| migration.no_tx) {
+        anyhow::bail!(
+            "state migration {} cannot run outside the atomic migration transaction",
+            migration.version
+        );
+    }
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    repair_legacy_state_migration_versions_on_connection(&mut transaction, migrator).await?;
+    migrator
+        .run_direct(/*target*/ None, &mut *transaction, /*skip*/ false)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn repair_legacy_state_migration_versions_on_connection(
+    connection: &mut SqliteConnection,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
     let migrations_table_exists = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?
     .is_some();
     if !migrations_table_exists {
         return Ok(());
     }
 
-    let legacy_recency_needs_repair = sqlx::query_scalar::<_, i64>(
-        r#"
+    for (legacy_version, current_version) in [(38_i64, 39_i64), (41_i64, 43_i64)] {
+        let Some(current_migration) = migrator
+            .migrations
+            .iter()
+            .find(|migration| migration.version == current_version)
+        else {
+            continue;
+        };
+        let legacy_migration_needs_repair = sqlx::query_scalar::<_, i64>(
+            r#"
 SELECT 1
 FROM _sqlx_migrations
 WHERE version = ?
@@ -78,20 +108,20 @@ WHERE version = ?
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
-        "#,
-    )
-    .bind(38_i64)
-    .bind(recency_migration.checksum.as_ref())
-    .bind(recency_migration.version)
-    .fetch_optional(pool)
-    .await?
-    .is_some();
-    if !legacy_recency_needs_repair {
-        return Ok(());
-    }
+            "#,
+        )
+        .bind(legacy_version)
+        .bind(current_migration.checksum.as_ref())
+        .bind(current_migration.version)
+        .fetch_optional(&mut *connection)
+        .await?
+        .is_some();
+        if !legacy_migration_needs_repair {
+            continue;
+        }
 
-    sqlx::query(
-        r#"
+        sqlx::query(
+            r#"
 UPDATE _sqlx_migrations
 SET version = ?, description = ?
 WHERE version = ?
@@ -99,15 +129,16 @@ WHERE version = ?
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
-        "#,
-    )
-    .bind(recency_migration.version)
-    .bind(recency_migration.description.as_ref())
-    .bind(38_i64)
-    .bind(recency_migration.checksum.as_ref())
-    .bind(recency_migration.version)
-    .execute(pool)
-    .await?;
+            "#,
+        )
+        .bind(current_migration.version)
+        .bind(current_migration.description.as_ref())
+        .bind(legacy_version)
+        .bind(current_migration.checksum.as_ref())
+        .bind(current_migration.version)
+        .execute(&mut *connection)
+        .await?;
+    }
     Ok(())
 }
 

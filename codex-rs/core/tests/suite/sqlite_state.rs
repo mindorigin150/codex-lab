@@ -177,6 +177,7 @@ async fn resume_restores_dynamic_tools_from_rollout_with_sqlite_enabled() -> Res
     })
     .await;
 
+    started.thread.shutdown_and_wait().await?;
     let mut resume_builder = test_codex().with_config(|config| {
         config
             .features
@@ -273,11 +274,7 @@ async fn resume_restores_legacy_dynamic_tools_from_rollout_with_sqlite_enabled()
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    started.thread.submit(Op::Shutdown).await?;
-    wait_for_event(&started.thread, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
+    started.thread.shutdown_and_wait().await?;
 
     let mut rollout_lines = fs::read_to_string(&rollout_path)?
         .lines()

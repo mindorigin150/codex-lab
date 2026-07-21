@@ -671,6 +671,7 @@ async fn resume_replays_permissions_messages() -> Result<()> {
         .await?;
     wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
+    initial.codex.shutdown_and_wait().await?;
     let resumed = builder.resume(&server, home, rollout_path).await?;
     resumed
         .codex
@@ -774,6 +775,7 @@ async fn resume_and_fork_append_permissions_messages() -> Result<()> {
     let permissions_base = permissions_texts(&req2.single_request());
     assert_eq!(permissions_base.len(), 2);
 
+    initial.codex.shutdown_and_wait().await?;
     builder = builder.with_config(|config| {
         config.permissions.approval_policy = Constrained::allow_any(AskForApproval::UnlessTrusted);
     });

@@ -10,6 +10,7 @@ use crate::context::TurnAborted;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
+use crate::init_state_db;
 use crate::session::step_context::StepContext;
 use crate::shell::default_user_shell;
 use crate::shell_snapshot::ShellSnapshot;
@@ -5215,6 +5216,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let (tx_event, _rx_event) = async_channel::unbounded();
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let config = build_test_config(codex_home.path()).await;
+    let state_db = Some(
+        init_state_db(&config)
+            .await
+            .expect("initialize isolated test state db"),
+    );
     let config = Arc::new(config);
     let thread_id = ThreadId::default();
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
@@ -5360,11 +5366,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata::default(),
         managed_network_requirements_configured: false,
         network_approval: Arc::clone(&network_approval),
-        state_db: None,
+        state_db: state_db.clone(),
         live_thread: None,
         thread_store: Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
-            /*state_db*/ None,
+            state_db,
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
@@ -5447,6 +5453,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
+        _test_codex_home: Some(codex_home),
         next_internal_sub_id: AtomicU64::new(0),
     };
 
@@ -7354,7 +7361,7 @@ where
     make_session_and_context_with_auth_config_home_and_rx(
         auth,
         dynamic_tools,
-        codex_home.path(),
+        codex_home,
         configure_config,
     )
     .await
@@ -7363,7 +7370,7 @@ where
 async fn make_session_and_context_with_auth_config_home_and_rx<F>(
     auth: CodexAuth,
     dynamic_tools: Vec<DynamicToolSpec>,
-    codex_home: &Path,
+    codex_home: tempfile::TempDir,
     configure_config: F,
 ) -> (
     Arc<Session>,
@@ -7374,9 +7381,13 @@ where
     F: FnOnce(&mut Config),
 {
     let (tx_event, rx_event) = async_channel::unbounded();
-    let mut config = build_test_config(codex_home).await;
+    let mut config = build_test_config(codex_home.path()).await;
     configure_config(&mut config);
-    let state_db = None;
+    let state_db = Some(
+        init_state_db(&config)
+            .await
+            .expect("initialize isolated test state db"),
+    );
     let config = Arc::new(config);
     let thread_id = ThreadId::default();
     let auth_manager = AuthManager::from_auth_for_testing(auth);
@@ -7608,6 +7619,7 @@ where
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
+        _test_codex_home: Some(codex_home),
         next_internal_sub_id: AtomicU64::new(0),
     });
 

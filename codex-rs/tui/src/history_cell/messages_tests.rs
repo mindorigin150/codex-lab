@@ -28,7 +28,7 @@ fn finalized_markdown_reuses_lines_primed_by_transcript_height() {
 
     assert_eq!(
         visible_lines(cell.transcript_hyperlink_lines(width)),
-        vec![Line::from("cached")]
+        vec![Line::from(vec!["• ".dim(), "cached".into()])]
     );
 }
 

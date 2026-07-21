@@ -539,8 +539,10 @@ mod rollback_activity_tests {
             client_id: None,
             message: message.to_string(),
             images: None,
+            audio: None,
             image_details: Vec::new(),
             local_images: Vec::new(),
+            local_audio: Vec::new(),
             local_image_details: Vec::new(),
             text_elements: Vec::new(),
         }))

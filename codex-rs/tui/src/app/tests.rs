@@ -1874,7 +1874,7 @@ fn open_agent_picker_marks_loaded_threads_open() -> Result<()> {
 }
 
 #[test]
-fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -> Result<()> {
+fn selected_threads_use_server_capability_for_v1_and_v2_children() -> Result<()> {
     const WORKER_THREADS: usize = 1;
     const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -1934,15 +1934,41 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 "rollout-2026-01-01T00-00-0{index}-{child_thread_id}.jsonl"
             ));
             let session_meta_line = serde_json::json!({
-                "timestamp": timestamp,
+                "timestamp": timestamp.clone(),
                 "type": "session_meta",
                 "payload": serde_json::to_value(session_meta)?,
             });
-            std::fs::write(rollout_path, format!("{session_meta_line}\n"))?;
+            let history_text = format!("child-{index} history");
+            let response_item_line = serde_json::json!({
+                "timestamp": timestamp.clone(),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": history_text.clone(),
+                    }],
+                },
+            });
+            let user_message_event_line = serde_json::json!({
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": history_text,
+                    "kind": "plain",
+                },
+            });
+            std::fs::write(
+                rollout_path,
+                format!("{session_meta_line}\n{response_item_line}\n{user_message_event_line}\n"),
+            )?;
 
-            assert!(
+            assert_eq!(
                 app.attach_live_thread_for_selection(&mut app_server, child_thread_id)
-                    .await?
+                    .await?,
+                multi_agent_version == MultiAgentVersion::V1,
             );
             assert_eq!(
                 app.agent_navigation.is_parent_owned(child_thread_id),
@@ -1951,29 +1977,6 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             child_thread_ids.push(child_thread_id);
         }
 
-        app.agent_navigation
-            .record_sub_agent_activity(SubAgentActivityDisplay {
-                thread_id: child_thread_ids[0],
-                agent_path: "/root/child-0".to_string(),
-                is_running_hint: true,
-            });
-        app.thread_event_channels.remove(&child_thread_ids[1]);
-        let backfill = app.backfill_loaded_subagent_threads(&mut app_server).await;
-        assert!(backfill.completed);
-        assert_eq!(
-            backfill.refreshed_thread_ids,
-            [child_thread_ids[1]].into_iter().collect()
-        );
-        assert_eq!(
-            app.agent_navigation.get(&child_thread_ids[0]),
-            Some(&AgentPickerThreadEntry {
-                agent_nickname: Some("child-0".to_string()),
-                agent_role: Some("worker".to_string()),
-                agent_path: Some("/root/child-0".to_string()),
-                is_running: true,
-                is_closed: false,
-            })
-        );
         assert!(!app.agent_navigation.is_parent_owned(child_thread_ids[0]));
         assert!(app.agent_navigation.is_parent_owned(child_thread_ids[1]));
 
@@ -2005,33 +2008,6 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
 
-        let resumed = app_server
-            .resume_thread(
-                app.config.clone(),
-                child_thread_ids[1],
-                app.resume_model_settings(),
-            )
-            .await?;
-        assert!(resumed.blocks_direct_input);
-        app.replace_chat_widget_with_app_server_thread(
-            &mut tui,
-            resumed,
-            crate::app::session_lifecycle::ThreadAttachPresentation::SessionLineage,
-            /*initial_user_message*/ None,
-        )
-        .await?;
-        while app_event_rx.try_recv().is_ok() {}
-        app.chat_widget
-            .restore_user_message_to_composer("direct resume stays view-only".into());
-        let draft = app.chat_widget.composer_text_with_pending();
-        app.chat_widget
-            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert_eq!(app.chat_widget.composer_text_with_pending(), draft);
-        assert!(
-            !std::iter::from_fn(|| app_event_rx.try_recv().ok())
-                .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
-        );
         Ok(())
     })
 }

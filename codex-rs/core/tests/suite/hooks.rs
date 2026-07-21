@@ -1988,6 +1988,7 @@ async fn resumed_thread_runs_resume_then_compact_session_start_hooks() -> Result
     initial.submit_turn("hello before resume").await?;
     assert_eq!(responses_mock.requests().len(), 1);
 
+    initial.codex.shutdown_and_wait().await?;
     let mut resume_builder = test_codex().with_config(move |config| {
         config.model_auto_compact_token_limit = Some(limit);
         trust_discovered_hooks(config);
@@ -2123,6 +2124,7 @@ async fn resumed_thread_keeps_stop_continuation_prompt_in_history() -> Result<()
     )
     .await;
 
+    initial.codex.shutdown_and_wait().await?;
     let mut resume_builder = test_codex().with_config(trust_discovered_hooks);
     let resumed = resume_builder.resume(&server, home, rollout_path).await?;
 

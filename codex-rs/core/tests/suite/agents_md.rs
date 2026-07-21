@@ -850,11 +850,7 @@ async fn cold_resume_invalidates_deleted_legacy_agents_md_once() -> Result<()> {
         .rollout_path
         .clone()
         .expect("rollout path");
-    initial.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&initial.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
+    initial.codex.shutdown_and_wait().await?;
 
     // Simulate a rollout written before AGENTS.md had a persisted WorldState section.
     remove_agents_md_world_state_section(&rollout_path)?;

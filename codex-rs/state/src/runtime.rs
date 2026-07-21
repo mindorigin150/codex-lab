@@ -12,7 +12,7 @@ use crate::ThreadMetadata;
 use crate::ThreadMetadataBuilder;
 use crate::ThreadsPage;
 use crate::apply_rollout_item;
-use crate::migrations::repair_legacy_recency_migration_version;
+use crate::migrations::migrate_state_database;
 use crate::migrations::runtime_goals_migrator;
 use crate::migrations::runtime_logs_migrator;
 use crate::migrations::runtime_memories_migrator;
@@ -447,13 +447,11 @@ async fn open_sqlite(
     let pool = pool_result
         .map_err(|source| recovery::RuntimeDbInitError::new(spec.label, "open", path, source))?;
     let started = Instant::now();
-    let migrate_result = async {
-        if matches!(spec.kind, DbKind::State) {
-            repair_legacy_recency_migration_version(&pool, migrator).await?;
-        }
+    let migrate_result = if matches!(spec.kind, DbKind::State) {
+        migrate_state_database(&pool, migrator).await
+    } else {
         migrator.run(&pool).await.map_err(anyhow::Error::from)
-    }
-    .await;
+    };
     crate::telemetry::record_init_result(
         telemetry_override,
         spec.kind,

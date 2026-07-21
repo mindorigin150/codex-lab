@@ -3901,6 +3901,7 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("gpt-5.4".to_string()),
+            permissions: Some(BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string()),
             ..Default::default()
         })
         .await?;

@@ -2062,6 +2062,7 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
         "remote compaction should not run before the next user message"
     );
 
+    initial.codex.shutdown_and_wait().await.unwrap();
     let mut resume_builder = test_codex().with_config(move |config| {
         set_test_compact_prompt(config);
         config.model_auto_compact_token_limit = Some(limit);
@@ -2389,13 +2390,9 @@ async fn pre_sampling_compact_falls_back_from_retired_previous_model_after_renam
 
     initial
         .codex
-        .submit(Op::Shutdown)
+        .shutdown_and_wait()
         .await
         .expect("shutdown initial session");
-    wait_for_event(&initial.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
 
     let model_provider = openai_model_provider(&server);
     let mut resumed_builder = test_codex()
@@ -2528,13 +2525,9 @@ async fn pre_sampling_compact_falls_back_when_previous_model_is_not_found() {
 
     initial
         .codex
-        .submit(Op::Shutdown)
+        .shutdown_and_wait()
         .await
         .expect("shutdown initial session");
-    wait_for_event(&initial.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
 
     let mut model_provider = openai_model_provider(&server);
     model_provider.stream_max_retries = Some(0);
@@ -3155,13 +3148,9 @@ async fn pre_sampling_compact_runs_after_resume_and_switch_to_smaller_model() {
 
     initial
         .codex
-        .submit(Op::Shutdown)
+        .shutdown_and_wait()
         .await
         .expect("shutdown initial session");
-    wait_for_event(&initial.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
 
     let model_provider = non_openai_model_provider(&server);
     let mut resumed_builder = test_codex()
@@ -3276,13 +3265,9 @@ async fn pre_sampling_compact_recovers_comp_hash_after_resume() {
 
     initial
         .codex
-        .submit(Op::Shutdown)
+        .shutdown_and_wait()
         .await
         .expect("shutdown initial session");
-    wait_for_event(&initial.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
 
     let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
     let persisted_comp_hash = rollout
@@ -3403,13 +3388,9 @@ async fn pre_sampling_compact_skips_missing_comp_hash_after_resume() {
 
     initial
         .codex
-        .submit(Op::Shutdown)
+        .shutdown_and_wait()
         .await
         .expect("shutdown initial session");
-    wait_for_event(&initial.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
 
     let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
     let persisted_turn_context = rollout
@@ -5393,11 +5374,7 @@ async fn remote_v2_compaction_keeps_creation_time_instructions_after_same_path_m
     );
 
     // Cold-resume the persisted replacement history with freshly loaded same-path configuration.
-    test.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
+    test.codex.shutdown_and_wait().await?;
     let resumed_cwd = test.config.cwd.clone();
     let mut resume_builder = test_codex()
         .with_home(Arc::clone(&home))
