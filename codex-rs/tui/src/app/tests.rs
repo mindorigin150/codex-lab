@@ -3464,6 +3464,7 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 preview: "agent thread".to_string(),
                 ephemeral: false,
                 history_mode: Default::default(),
+                collaboration_mode: None,
                 model_provider: "agent-provider".to_string(),
                 created_at: 1,
                 updated_at: 2,
@@ -3560,6 +3561,7 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 preview: "agent thread".to_string(),
                 ephemeral: false,
                 history_mode: Default::default(),
+                collaboration_mode: None,
                 model_provider: "agent-provider".to_string(),
                 created_at: 1,
                 updated_at: 2,
@@ -3623,6 +3625,7 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         preview: "read thread".to_string(),
         ephemeral: false,
         history_mode: Default::default(),
+        collaboration_mode: None,
         model_provider: "read-provider".to_string(),
         created_at: 1,
         updated_at: 2,
@@ -6383,6 +6386,14 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
         .await?;
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
+    app.chat_widget
+        .set_collaboration_mask(CollaborationModeMask {
+            name: "Plan".to_string(),
+            mode: Some(ModeKind::Plan),
+            model: Some(app.chat_widget.current_model().to_string()),
+            reasoning_effort: Some(app.chat_widget.current_reasoning_effort()),
+            developer_instructions: None,
+        });
     while app_event_rx.try_recv().is_ok() {}
     let source_before = std::fs::read_to_string(&source_path)?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -6414,6 +6425,10 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
         .thread_id()
         .expect("prompt edit should switch to a forked thread");
     assert_ne!(forked_thread_id, source_thread_id);
+    assert_eq!(
+        app.chat_widget.active_collaboration_mode_kind(),
+        ModeKind::Plan
+    );
     assert_eq!(app.chat_widget.composer_text_with_pending(), prompt.text);
     assert_eq!(
         app.chat_widget.remote_image_urls(),
@@ -6430,15 +6445,23 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
             .collect::<Vec<_>>(),
         vec!["turn-1", "turn-2"]
     );
+    let forked_thread = app_server
+        .thread_read(forked_thread_id, /*include_turns*/ true)
+        .await?;
     assert_eq!(
-        app_server
-            .thread_read(forked_thread_id, /*include_turns*/ true)
-            .await?
+        forked_thread
             .turns
             .iter()
             .map(|turn| turn.id.as_str())
             .collect::<Vec<_>>(),
         vec!["turn-1"]
+    );
+    assert_eq!(
+        forked_thread
+            .collaboration_mode
+            .as_ref()
+            .map(|mode| mode.mode),
+        Some(ModeKind::Plan)
     );
 
     let history = std::iter::from_fn(|| app_event_rx.try_recv().ok())
@@ -6492,6 +6515,14 @@ async fn prompt_edit_before_first_prompt_starts_fresh_thread() -> Result<()> {
         .await?;
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
+    app.chat_widget
+        .set_collaboration_mask(CollaborationModeMask {
+            name: "Plan".to_string(),
+            mode: Some(ModeKind::Plan),
+            model: Some(app.chat_widget.current_model().to_string()),
+            reasoning_effort: Some(app.chat_widget.current_reasoning_effort()),
+            developer_instructions: None,
+        });
     while app_event_rx.try_recv().is_ok() {}
     let mut tui = crate::tui::test_support::make_test_tui()?;
 
@@ -6512,7 +6543,20 @@ async fn prompt_edit_before_first_prompt_starts_fresh_thread() -> Result<()> {
         .thread_id()
         .expect("first prompt edit should start a fresh thread");
     assert_ne!(fresh_thread_id, source_thread_id);
+    assert_eq!(
+        app.chat_widget.active_collaboration_mode_kind(),
+        ModeKind::Plan
+    );
     assert_eq!(app.chat_widget.composer_text_with_pending(), "first prompt");
+    assert_eq!(
+        app_server
+            .thread_read(fresh_thread_id, /*include_turns*/ false)
+            .await?
+            .collaboration_mode
+            .as_ref()
+            .map(|mode| mode.mode),
+        Some(ModeKind::Plan)
+    );
     let history = std::iter::from_fn(|| app_event_rx.try_recv().ok())
         .filter_map(|event| match event {
             AppEvent::InsertHistoryCell(cell) => {

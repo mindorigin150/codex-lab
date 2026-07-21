@@ -52,6 +52,7 @@ pub(super) fn test_thread_metadata(
         recency_at: now,
         source: "cli".to_string(),
         history_mode: ThreadHistoryMode::Legacy,
+        collaboration_mode: None,
         thread_source: None,
         agent_nickname: None,
         agent_role: None,

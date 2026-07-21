@@ -111,6 +111,7 @@ use codex_app_server_protocol::UserInput;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
+use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
@@ -149,6 +150,21 @@ pub(crate) enum ForkGoalContinuation {
 enum ForkPresentation {
     Regular,
     SideConversation,
+}
+
+#[derive(Clone, Debug)]
+enum InitialCollaborationMode {
+    Inherit,
+    Override(CollaborationMode),
+}
+
+impl InitialCollaborationMode {
+    fn into_override(self) -> Option<CollaborationMode> {
+        match self {
+            Self::Inherit => None,
+            Self::Override(mode) => Some(mode),
+        }
+    }
 }
 
 fn bootstrap_request_error(context: &'static str, err: TypedRequestError) -> color_eyre::Report {
@@ -512,6 +528,33 @@ impl AppServerSession {
         config: &Config,
         session_start_source: Option<ThreadStartSource>,
     ) -> Result<AppServerStartedThread> {
+        self.start_thread_with_overrides(
+            config,
+            session_start_source,
+            InitialCollaborationMode::Inherit,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_thread_with_collaboration_mode(
+        &mut self,
+        config: &Config,
+        collaboration_mode: CollaborationMode,
+    ) -> Result<AppServerStartedThread> {
+        self.start_thread_with_overrides(
+            config,
+            /*session_start_source*/ None,
+            InitialCollaborationMode::Override(collaboration_mode),
+        )
+        .await
+    }
+
+    async fn start_thread_with_overrides(
+        &mut self,
+        config: &Config,
+        session_start_source: Option<ThreadStartSource>,
+        collaboration_mode: InitialCollaborationMode,
+    ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(config);
         let response: ThreadStartResponse = self
@@ -523,6 +566,7 @@ impl AppServerSession {
                     self.thread_params_mode(),
                     self.remote_cwd_override.as_deref(),
                     session_start_source,
+                    collaboration_mode,
                 ),
             })
             .await
@@ -585,6 +629,24 @@ impl AppServerSession {
         .await
     }
 
+    pub(crate) async fn fork_thread_with_collaboration_mode(
+        &mut self,
+        config: Config,
+        thread_id: ThreadId,
+        collaboration_mode: CollaborationMode,
+    ) -> Result<AppServerStartedThread> {
+        self.fork_thread_at_with_overrides(
+            config,
+            thread_id,
+            /*last_turn_id*/ None,
+            /*before_turn_id*/ None,
+            ForkGoalContinuation::StartIfIdle,
+            ForkPresentation::Regular,
+            InitialCollaborationMode::Override(collaboration_mode),
+        )
+        .await
+    }
+
     pub(crate) async fn fork_thread_at(
         &mut self,
         config: Config,
@@ -593,13 +655,14 @@ impl AppServerSession {
         before_turn_id: Option<String>,
         goal_continuation: ForkGoalContinuation,
     ) -> Result<AppServerStartedThread> {
-        self.fork_thread_at_with_presentation(
+        self.fork_thread_at_with_overrides(
             config,
             thread_id,
             last_turn_id,
             before_turn_id,
             goal_continuation,
             ForkPresentation::Regular,
+            InitialCollaborationMode::Inherit,
         )
         .await
     }
@@ -609,18 +672,58 @@ impl AppServerSession {
         config: Config,
         thread_id: ThreadId,
     ) -> Result<AppServerStartedThread> {
-        self.fork_thread_at_with_presentation(
+        self.fork_thread_at_with_overrides(
             config,
             thread_id,
             /*last_turn_id*/ None,
             /*before_turn_id*/ None,
             ForkGoalContinuation::StartIfIdle,
             ForkPresentation::SideConversation,
+            InitialCollaborationMode::Inherit,
         )
         .await
     }
 
-    async fn fork_thread_at_with_presentation(
+    pub(crate) async fn fork_side_thread_with_collaboration_mode(
+        &mut self,
+        config: Config,
+        thread_id: ThreadId,
+        collaboration_mode: CollaborationMode,
+    ) -> Result<AppServerStartedThread> {
+        self.fork_thread_at_with_overrides(
+            config,
+            thread_id,
+            /*last_turn_id*/ None,
+            /*before_turn_id*/ None,
+            ForkGoalContinuation::StartIfIdle,
+            ForkPresentation::SideConversation,
+            InitialCollaborationMode::Override(collaboration_mode),
+        )
+        .await
+    }
+
+    pub(crate) async fn fork_thread_at_with_collaboration_mode(
+        &mut self,
+        config: Config,
+        thread_id: ThreadId,
+        last_turn_id: Option<String>,
+        before_turn_id: Option<String>,
+        goal_continuation: ForkGoalContinuation,
+        collaboration_mode: CollaborationMode,
+    ) -> Result<AppServerStartedThread> {
+        self.fork_thread_at_with_overrides(
+            config,
+            thread_id,
+            last_turn_id,
+            before_turn_id,
+            goal_continuation,
+            ForkPresentation::Regular,
+            InitialCollaborationMode::Override(collaboration_mode),
+        )
+        .await
+    }
+
+    async fn fork_thread_at_with_overrides(
         &mut self,
         config: Config,
         thread_id: ThreadId,
@@ -628,6 +731,7 @@ impl AppServerSession {
         before_turn_id: Option<String>,
         goal_continuation: ForkGoalContinuation,
         presentation: ForkPresentation,
+        collaboration_mode: InitialCollaborationMode,
     ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(&config);
@@ -646,6 +750,7 @@ impl AppServerSession {
                         thread_id,
                         self.thread_params_mode(),
                         self.remote_cwd_override.as_deref(),
+                        collaboration_mode,
                     )
                 },
             })
@@ -1291,6 +1396,7 @@ pub(crate) async fn start_thread_with_request_handle(
                 thread_params_mode,
                 remote_cwd_override.as_deref(),
                 /*session_start_source*/ None,
+                InitialCollaborationMode::Inherit,
             ),
         })
         .await
@@ -1505,6 +1611,7 @@ fn thread_start_params_from_config(
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
     session_start_source: Option<ThreadStartSource>,
+    collaboration_mode: InitialCollaborationMode,
 ) -> ThreadStartParams {
     let permissions = permissions_selection_from_config(config, thread_params_mode);
     let sandbox = permissions
@@ -1533,6 +1640,7 @@ fn thread_start_params_from_config(
         developer_instructions: with_terminal_visualization_instructions(
             config, /*control_instructions*/ None,
         ),
+        collaboration_mode: collaboration_mode.into_override(),
         ..ThreadStartParams::default()
     }
 }
@@ -1594,6 +1702,7 @@ fn thread_fork_params_from_config(
     thread_id: ThreadId,
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
+    collaboration_mode: InitialCollaborationMode,
 ) -> ThreadForkParams {
     let permissions = permissions_selection_from_config(&config, thread_params_mode);
     let sandbox = permissions
@@ -1624,6 +1733,7 @@ fn thread_fork_params_from_config(
         ),
         ephemeral: config.ephemeral,
         thread_source: Some(ThreadSource::User),
+        collaboration_mode: collaboration_mode.into_override(),
         ..ThreadForkParams::default()
     }
 }
@@ -1719,6 +1829,7 @@ async fn thread_session_state_from_thread_start_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
+        response.thread.collaboration_mode.clone(),
         config,
     )
     .await
@@ -1760,6 +1871,7 @@ async fn thread_session_state_from_thread_resume_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
+        response.thread.collaboration_mode.clone(),
         config,
     )
     .await
@@ -1792,6 +1904,7 @@ async fn thread_session_state_from_thread_fork_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
+        response.thread.collaboration_mode.clone(),
         config,
     )
     .await
@@ -1831,6 +1944,7 @@ async fn thread_session_state_from_thread_response(
     runtime_workspace_roots: Vec<AbsolutePathBuf>,
     instruction_source_paths: Vec<PathUri>,
     reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    collaboration_mode: Option<CollaborationMode>,
     config: &Config,
 ) -> Result<ThreadSessionState, String> {
     let thread_id = ThreadId::from_string(thread_id)
@@ -1859,7 +1973,7 @@ async fn thread_session_state_from_thread_response(
         runtime_workspace_roots,
         instruction_source_paths,
         reasoning_effort,
-        collaboration_mode: None,
+        collaboration_mode: collaboration_mode.map(Box::new),
         personality: config.personality,
         message_history: Some(MessageHistoryMetadata {
             log_id,
@@ -2018,6 +2132,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            InitialCollaborationMode::Inherit,
         );
 
         assert_eq!(params.cwd, Some(config.cwd.to_string_lossy().to_string()));
@@ -2047,9 +2162,42 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             Some(ThreadStartSource::Clear),
+            InitialCollaborationMode::Inherit,
         );
 
         assert_eq!(params.session_start_source, Some(ThreadStartSource::Clear));
+    }
+
+    #[tokio::test]
+    async fn thread_lifecycle_params_forward_collaboration_mode_override() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let config = build_config(&temp_dir).await;
+        let collaboration_mode = CollaborationMode {
+            mode: codex_protocol::config_types::ModeKind::Plan,
+            settings: codex_protocol::config_types::Settings {
+                model: "gpt-plan".to_string(),
+                reasoning_effort: None,
+                developer_instructions: None,
+            },
+        };
+
+        let start = thread_start_params_from_config(
+            &config,
+            ThreadParamsMode::Embedded,
+            /*remote_cwd_override*/ None,
+            /*session_start_source*/ None,
+            InitialCollaborationMode::Override(collaboration_mode.clone()),
+        );
+        let fork = thread_fork_params_from_config(
+            config,
+            ThreadId::new(),
+            ThreadParamsMode::Embedded,
+            /*remote_cwd_override*/ None,
+            InitialCollaborationMode::Override(collaboration_mode.clone()),
+        );
+
+        assert_eq!(start.collaboration_mode, Some(collaboration_mode.clone()));
+        assert_eq!(fork.collaboration_mode, Some(collaboration_mode));
     }
 
     #[test]
@@ -2148,6 +2296,7 @@ mod tests {
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            InitialCollaborationMode::Inherit,
         );
         let resume = thread_resume_params_from_config(
             config.clone(),
@@ -2161,6 +2310,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
+            InitialCollaborationMode::Inherit,
         );
 
         assert_eq!(start.cwd, None);
@@ -2292,6 +2442,7 @@ mod tests {
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
             /*session_start_source*/ None,
+            InitialCollaborationMode::Inherit,
         );
         let resume = thread_resume_params_from_config(
             config.clone(),
@@ -2305,6 +2456,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
+            InitialCollaborationMode::Inherit,
         );
 
         assert_eq!(start.cwd.as_deref(), Some("repo/on/server"));
@@ -2344,6 +2496,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            InitialCollaborationMode::Inherit,
         );
         let resume = thread_resume_params_from_config(
             config.clone(),
@@ -2357,6 +2510,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            InitialCollaborationMode::Inherit,
         );
 
         let expected_service_tier = Some(Some(ServiceTier::Fast.request_value().to_string()));
@@ -2539,6 +2693,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            InitialCollaborationMode::Inherit,
         );
 
         assert_eq!(params.base_instructions.as_deref(), Some("Base override."));
@@ -2595,6 +2750,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            InitialCollaborationMode::Inherit,
         );
         let control_resume = thread_resume_params_from_config(
             config.clone(),
@@ -2608,6 +2764,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            InitialCollaborationMode::Inherit,
         );
 
         assert_eq!(control_start.developer_instructions, None);
@@ -2625,6 +2782,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            InitialCollaborationMode::Inherit,
         );
         let treatment_resume = thread_resume_params_from_config(
             config.clone(),
@@ -2638,6 +2796,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            InitialCollaborationMode::Inherit,
         );
         let expected = format!(
             "Developer override.\n\n{}",
@@ -2675,6 +2834,7 @@ mod tests {
                 preview: "hello".to_string(),
                 ephemeral: false,
                 history_mode: Default::default(),
+                collaboration_mode: None,
                 model_provider: "openai".to_string(),
                 created_at: 1,
                 updated_at: 2,
@@ -2870,6 +3030,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             /*reasoning_effort*/ None,
+            /*collaboration_mode*/ None,
             &config,
         )
         .await
@@ -2905,12 +3066,55 @@ mod tests {
             Vec::new(),
             Vec::new(),
             /*reasoning_effort*/ None,
+            /*collaboration_mode*/ None,
             &config,
         )
         .await
         .expect("session should map");
 
         assert_eq!(session.forked_from_id, Some(forked_from_id));
+    }
+
+    #[tokio::test]
+    async fn session_configured_preserves_collaboration_mode() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let config = build_config(&temp_dir).await;
+        let thread_id = ThreadId::new();
+        let collaboration_mode = CollaborationMode {
+            mode: codex_protocol::config_types::ModeKind::Plan,
+            settings: codex_protocol::config_types::Settings {
+                model: "gpt-plan".to_string(),
+                reasoning_effort: None,
+                developer_instructions: None,
+            },
+        };
+
+        let session = thread_session_state_from_thread_response(
+            &thread_id.to_string(),
+            /*forked_from_id*/ None,
+            /*thread_name*/ None,
+            /*rollout_path*/ None,
+            "gpt-plan".to_string(),
+            "openai".to_string(),
+            /*service_tier*/ None,
+            AskForApproval::Never,
+            codex_protocol::config_types::ApprovalsReviewer::User,
+            PermissionProfile::read_only(),
+            /*active_permission_profile*/ None,
+            test_path_buf("/tmp/project").abs(),
+            Vec::new(),
+            Vec::new(),
+            /*reasoning_effort*/ None,
+            Some(collaboration_mode.clone()),
+            &config,
+        )
+        .await
+        .expect("session should map");
+
+        assert_eq!(
+            session.collaboration_mode.as_deref(),
+            Some(&collaboration_mode)
+        );
     }
 
     #[test]

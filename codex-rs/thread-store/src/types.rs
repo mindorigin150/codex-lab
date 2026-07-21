@@ -7,6 +7,7 @@ use codex_app_server_protocol::CodexErrorInfo;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
@@ -59,6 +60,8 @@ pub struct ThreadPersistenceMetadata {
     pub model_provider: String,
     /// Memory mode associated with the live thread.
     pub memory_mode: MemoryMode,
+    /// Collaboration mode active when persistence was opened.
+    pub collaboration_mode: Option<CollaborationMode>,
 }
 
 /// Extra configuration fields for a thread.
@@ -502,6 +505,8 @@ pub struct StoredThread {
     pub source: SessionSource,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
+    /// Last explicitly selected collaboration mode, if known.
+    pub collaboration_mode: Option<CollaborationMode>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Optional random nickname for thread-spawn sub-agents.
@@ -602,6 +607,8 @@ pub struct ThreadMetadataPatch {
         with = "optional_option"
     )]
     pub reasoning_effort: ClearableField<ReasoningEffort>,
+    /// Active collaboration mode.
+    pub collaboration_mode: Option<CollaborationMode>,
     /// Creation timestamp when known.
     pub created_at: Option<DateTime<Utc>>,
     /// Last update timestamp for this metadata observation.
@@ -684,6 +691,9 @@ impl ThreadMetadataPatch {
         if next.reasoning_effort.is_some() {
             self.reasoning_effort = next.reasoning_effort;
         }
+        if next.collaboration_mode.is_some() {
+            self.collaboration_mode = next.collaboration_mode;
+        }
         if next.created_at.is_some() {
             self.created_at = next.created_at;
         }
@@ -744,6 +754,7 @@ impl ThreadMetadataPatch {
             && self.model_provider.is_none()
             && self.model.is_none()
             && self.reasoning_effort.is_none()
+            && self.collaboration_mode.is_none()
             && self.created_at.is_none()
             && self.updated_at.is_none()
             && self.advance_recency_at.is_none()

@@ -71,6 +71,9 @@ pub struct ThreadStartParams {
     )]
     #[ts(optional = nullable)]
     pub service_tier: Option<Option<String>>,
+    /// Collaboration mode used to initialize the thread.
+    #[ts(optional = nullable)]
+    pub collaboration_mode: Option<CollaborationMode>,
     #[ts(optional = nullable)]
     pub cwd: Option<String>,
     /// Replace the thread's runtime workspace roots. Paths must be absolute.
@@ -544,6 +547,9 @@ pub struct ThreadForkParams {
     )]
     #[ts(optional = nullable)]
     pub service_tier: Option<Option<String>>,
+    /// Collaboration mode used to initialize the forked thread.
+    #[ts(optional = nullable)]
+    pub collaboration_mode: Option<CollaborationMode>,
     #[ts(optional = nullable)]
     pub cwd: Option<String>,
     /// Replace the thread's runtime workspace roots. Paths must be absolute.

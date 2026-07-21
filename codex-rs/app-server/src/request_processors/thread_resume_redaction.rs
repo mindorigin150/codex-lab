@@ -195,6 +195,7 @@ mod tests {
             preview: "preview".to_string(),
             ephemeral: false,
             history_mode: Default::default(),
+            collaboration_mode: None,
             model_provider: "mock_provider".to_string(),
             created_at: 0,
             updated_at: 0,

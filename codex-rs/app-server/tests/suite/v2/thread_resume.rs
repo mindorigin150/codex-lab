@@ -24,6 +24,7 @@ use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::McpToolCallAppContext;
 use codex_app_server_protocol::PatchApplyStatus;
@@ -50,6 +51,7 @@ use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSettingsUpdateParams;
 use codex_app_server_protocol::ThreadSettingsUpdateResponse;
+use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -820,17 +822,18 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     assert_eq!(reasoning_effort, Some(ReasoningEffort::Ultra));
     assert_eq!(approvals_reviewer, ApprovalsReviewer::AutoReview);
 
+    let requested_collaboration_mode = CollaborationMode {
+        mode: ModeKind::Plan,
+        settings: Settings {
+            model: "gpt-5.2-codex".to_string(),
+            reasoning_effort: None,
+            developer_instructions: None,
+        },
+    };
     let update_id = mcp
         .send_thread_settings_update_request(ThreadSettingsUpdateParams {
             thread_id: thread_id.clone(),
-            collaboration_mode: Some(CollaborationMode {
-                mode: ModeKind::Default,
-                settings: Settings {
-                    model: "gpt-5.2-codex".to_string(),
-                    reasoning_effort: None,
-                    developer_instructions: None,
-                },
-            }),
+            collaboration_mode: Some(requested_collaboration_mode),
             ..Default::default()
         })
         .await?;
@@ -840,11 +843,17 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     )
     .await??;
     let _: ThreadSettingsUpdateResponse = to_response(update_resp)?;
-    timeout(
+    let updated_notification: JSONRPCNotification = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("thread/settings/updated"),
     )
     .await??;
+    let updated: ThreadSettingsUpdatedNotification = serde_json::from_value(
+        updated_notification
+            .params
+            .expect("thread/settings/updated should include params"),
+    )?;
+    let applied_collaboration_mode = updated.thread_settings.collaboration_mode;
     drop(mcp);
 
     let mut mcp = TestAppServer::builder()
@@ -864,10 +873,13 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     )
     .await??;
     let ThreadResumeResponse {
-        reasoning_effort, ..
+        thread,
+        reasoning_effort,
+        ..
     } = to_response::<ThreadResumeResponse>(resume_resp)?;
 
     assert_eq!(reasoning_effort, None);
+    assert_eq!(thread.collaboration_mode, Some(applied_collaboration_mode));
 
     Ok(())
 }
@@ -2679,6 +2691,7 @@ stream_max_retries = 0
         dynamic_tools: None,
         selected_capability_roots: Vec::new(),
         memory_mode: None,
+        collaboration_mode: None,
         history_mode: Default::default(),
         history_base: None,
         subagent_history_start_ordinal: None,

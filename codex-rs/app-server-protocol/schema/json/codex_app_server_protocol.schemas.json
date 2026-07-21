@@ -17863,6 +17863,17 @@
             "description": "Version of the CLI that created the thread.",
             "type": "string"
           },
+          "collaborationMode": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/CollaborationMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Last selected collaboration mode, when persisted or currently loaded."
+          },
           "createdAt": {
             "description": "Unix timestamp (in seconds) when the thread was created.",
             "format": "int64",
@@ -18155,6 +18166,17 @@
               "string",
               "null"
             ]
+          },
+          "collaborationMode": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/CollaborationMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Collaboration mode used to initialize the forked thread."
           },
           "config": {
             "additionalProperties": true,
@@ -20322,6 +20344,17 @@
               "string",
               "null"
             ]
+          },
+          "collaborationMode": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/CollaborationMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Collaboration mode used to initialize the thread."
           },
           "config": {
             "additionalProperties": true,

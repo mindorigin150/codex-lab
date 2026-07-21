@@ -3,6 +3,7 @@ use super::ThreadItem;
 use super::ThreadStatus;
 use super::TurnStatus;
 use codex_experimental_api_macros::ExperimentalApi;
+use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
@@ -187,6 +188,8 @@ pub struct Thread {
     #[experimental("thread.historyMode")]
     #[serde(default)]
     pub history_mode: ThreadHistoryMode,
+    /// Last selected collaboration mode, when persisted or currently loaded.
+    pub collaboration_mode: Option<CollaborationMode>,
     /// Model provider used for this thread (for example, 'openai').
     pub model_provider: String,
     /// Unix timestamp (in seconds) when the thread was created.

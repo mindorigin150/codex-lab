@@ -3120,6 +3120,9 @@ pub struct SessionMeta {
     pub selected_capability_roots: Vec<SelectedCapabilityRoot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_mode: Option<String>,
+    /// Collaboration mode active when the thread was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_mode: Option<CollaborationMode>,
     #[serde(default)]
     pub history_mode: ThreadHistoryMode,
     /// Exclusive prefix of another paginated rollout inherited by this thread.
@@ -3160,6 +3163,7 @@ impl Default for SessionMeta {
             dynamic_tools: None,
             selected_capability_roots: Vec::new(),
             memory_mode: None,
+            collaboration_mode: None,
             history_mode: ThreadHistoryMode::default(),
             history_base: None,
             subagent_history_start_ordinal: None,

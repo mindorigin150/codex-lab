@@ -1551,6 +1551,7 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
                 cwd: Some(codex_home.path().to_path_buf()),
                 model_provider: "mock_provider".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
+                collaboration_mode: None,
             },
         })
         .await?;
@@ -2265,6 +2266,7 @@ async fn seed_pathless_store_thread(
                 cwd: None,
                 model_provider: "test-provider".to_string(),
                 memory_mode: ThreadMemoryMode::Disabled,
+                collaboration_mode: None,
             },
         })
         .await?;

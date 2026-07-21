@@ -234,6 +234,68 @@ INSERT INTO threads (
 }
 
 #[tokio::test]
+async fn collaboration_mode_migration_preserves_legacy_threads() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory database should open");
+    migrator_through(/*version*/ 40)
+        .run(&pool)
+        .await
+        .expect("pre-collaboration-mode migrations should apply");
+
+    sqlx::query(
+        r#"
+INSERT INTO threads (
+    id,
+    rollout_path,
+    created_at,
+    updated_at,
+    created_at_ms,
+    updated_at_ms,
+    source,
+    model_provider,
+    cwd,
+    title,
+    sandbox_policy,
+    approval_mode
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("00000000-0000-0000-0000-000000000003")
+    .bind("/tmp/legacy.jsonl")
+    .bind(1_700_000_400_i64)
+    .bind(1_700_000_500_i64)
+    .bind(1_700_000_400_123_i64)
+    .bind(1_700_000_500_456_i64)
+    .bind("cli")
+    .bind("openai")
+    .bind("/tmp")
+    .bind("")
+    .bind("read-only")
+    .bind("on-request")
+    .execute(&pool)
+    .await
+    .expect("legacy row should insert");
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("collaboration mode migration should apply");
+
+    let migrated = sqlx::query("SELECT collaboration_mode FROM threads WHERE id = ?")
+        .bind("00000000-0000-0000-0000-000000000003")
+        .fetch_one(&pool)
+        .await
+        .expect("migrated legacy row should load");
+    assert_eq!(
+        migrated.get::<Option<String>, _>("collaboration_mode"),
+        None
+    );
+}
+
+#[tokio::test]
 async fn repairs_recency_migration_that_was_applied_as_version_38() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)

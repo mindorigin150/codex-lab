@@ -16,6 +16,7 @@ SELECT
     threads.recency_at_ms AS recency_at,
     threads.source,
     threads.history_mode,
+    threads.collaboration_mode,
     threads.thread_source,
     threads.agent_nickname,
     threads.agent_role,
@@ -547,6 +548,7 @@ INSERT INTO threads (
     recency_at_ms,
     source,
     history_mode,
+    collaboration_mode,
     thread_source,
     agent_nickname,
     agent_role,
@@ -583,6 +585,13 @@ ON CONFLICT(id) DO NOTHING
         .bind(datetime_to_epoch_millis(recency_at))
         .bind(metadata.source.as_str())
         .bind(metadata.history_mode.as_str())
+        .bind(
+            metadata
+                .collaboration_mode
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        )
         .bind(
             metadata
                 .thread_source
@@ -816,6 +825,7 @@ INSERT INTO threads (
     recency_at_ms,
     source,
     history_mode,
+    collaboration_mode,
     thread_source,
     agent_nickname,
     agent_role,
@@ -849,6 +859,7 @@ ON CONFLICT(id) DO UPDATE SET
     recency_at_ms = threads.recency_at_ms,
     source = excluded.source,
     history_mode = excluded.history_mode,
+    collaboration_mode = COALESCE(excluded.collaboration_mode, threads.collaboration_mode),
     thread_source = excluded.thread_source,
     agent_nickname = excluded.agent_nickname,
     agent_role = excluded.agent_role,
@@ -881,6 +892,13 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(datetime_to_epoch_millis(insert_recency_at))
         .bind(metadata.source.as_str())
         .bind(metadata.history_mode.as_str())
+        .bind(
+            metadata
+                .collaboration_mode
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        )
         .bind(
             metadata
                 .thread_source
@@ -1173,6 +1191,7 @@ SELECT
     threads.recency_at_ms AS recency_at,
     threads.source,
     threads.history_mode,
+    threads.collaboration_mode,
     threads.thread_source,
     threads.agent_nickname,
     threads.agent_role,
@@ -1384,6 +1403,9 @@ mod tests {
     use crate::runtime::test_support::test_thread_metadata;
     use crate::runtime::test_support::unique_temp_dir;
     use anyhow::Result;
+    use codex_protocol::config_types::CollaborationMode;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::config_types::Settings;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::GitInfo;
     use codex_protocol::protocol::SessionMeta;
@@ -1429,6 +1451,69 @@ mod tests {
                 .await
                 .expect("memory mode should remain readable");
         assert_eq!(memory_mode, "disabled");
+    }
+
+    #[tokio::test]
+    async fn collaboration_mode_round_trips_and_legacy_null_is_preserved() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000124").expect("valid thread id");
+        let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("legacy metadata insert should succeed");
+        assert_eq!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .expect("thread read should succeed")
+                .expect("thread should exist")
+                .collaboration_mode,
+            None
+        );
+
+        let plan_mode = CollaborationMode {
+            mode: ModeKind::Plan,
+            settings: Settings {
+                model: "gpt-5.2-codex".to_string(),
+                reasoning_effort: None,
+                developer_instructions: Some("plan carefully".to_string()),
+            },
+        };
+        metadata.collaboration_mode = Some(plan_mode.clone());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("collaboration mode upsert should succeed");
+        assert_eq!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .expect("thread read should succeed")
+                .expect("thread should exist")
+                .collaboration_mode,
+            Some(plan_mode.clone())
+        );
+
+        metadata.collaboration_mode = None;
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("rollout reconciliation should succeed");
+        assert_eq!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .expect("thread read should succeed")
+                .expect("thread should exist")
+                .collaboration_mode,
+            Some(plan_mode)
+        );
     }
 
     #[tokio::test]
@@ -2099,6 +2184,7 @@ mod tests {
                 dynamic_tools: None,
                 selected_capability_roots: Vec::new(),
                 memory_mode: Some("polluted".to_string()),
+                collaboration_mode: None,
                 history_mode: Default::default(),
                 history_base: None,
                 subagent_history_start_ordinal: None,
@@ -2166,6 +2252,7 @@ mod tests {
                 dynamic_tools: None,
                 selected_capability_roots: Vec::new(),
                 memory_mode: None,
+                collaboration_mode: None,
                 history_mode: Default::default(),
                 history_base: None,
                 subagent_history_start_ordinal: None,

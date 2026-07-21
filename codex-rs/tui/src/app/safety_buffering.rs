@@ -113,13 +113,15 @@ impl App {
         let retry_display = ChatWidget::user_message_display_from_inputs(items);
 
         self.config = retry_config.clone();
+        let collaboration_mode = self.chat_widget.effective_collaboration_mode();
         let started = app_server
-            .fork_thread_at(
+            .fork_thread_at_with_collaboration_mode(
                 retry_config,
                 thread_id,
                 /*last_turn_id*/ None,
                 /*before_turn_id*/ Some(turn_id),
                 ForkGoalContinuation::DeferUntilNextTurn,
+                collaboration_mode,
             )
             .await;
         let started = match started {

@@ -321,6 +321,9 @@ async fn apply_metadata_update(
             if let Some(reasoning_effort) = patch.reasoning_effort {
                 metadata.reasoning_effort = reasoning_effort;
             }
+            if let Some(collaboration_mode) = patch.collaboration_mode {
+                metadata.collaboration_mode = Some(collaboration_mode);
+            }
             if let Some(created_at) = patch.created_at {
                 metadata.created_at = created_at;
             }
@@ -547,7 +550,8 @@ fn sqlite_write_failure_should_block(patch: &ThreadMetadataPatch) -> bool {
     // failure isolation so a corrupted optional state DB does not make JSONL transcript durability
     // look broken. Explicit git-only updates still require SQLite because partial git patches need
     // the existing SQLite value to preserve unspecified fields.
-    patch.git_info.is_some() && !has_observed_metadata_facts(patch)
+    patch.collaboration_mode.is_some()
+        || (patch.git_info.is_some() && !has_observed_metadata_facts(patch))
 }
 
 fn sqlite_write_error_is_best_effort(err: &ThreadStoreError) -> bool {
@@ -561,6 +565,7 @@ fn has_observed_metadata_facts(patch: &ThreadMetadataPatch) -> bool {
         || patch.model_provider.is_some()
         || patch.model.is_some()
         || patch.reasoning_effort.is_some()
+        || patch.collaboration_mode.is_some()
         || patch.created_at.is_some()
         || patch.source.is_some()
         || patch.thread_source.is_some()
@@ -2068,6 +2073,7 @@ mod tests {
             cwd: Some(std::env::current_dir().expect("cwd")),
             model_provider: "test-provider".to_string(),
             memory_mode: ThreadMemoryMode::Enabled,
+            collaboration_mode: None,
         }
     }
 

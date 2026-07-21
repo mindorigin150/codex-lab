@@ -944,6 +944,7 @@ async fn create_paginated_subagent_thread(
                 cwd: Some(std::env::current_dir().expect("cwd")),
                 model_provider: "test-provider".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
+                collaboration_mode: None,
             },
         })
         .await

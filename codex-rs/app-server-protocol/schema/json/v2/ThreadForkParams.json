@@ -63,6 +63,35 @@
         }
       ]
     },
+    "CollaborationMode": {
+      "description": "Collaboration mode for a Codex session.",
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/ModeKind"
+        },
+        "settings": {
+          "$ref": "#/definitions/Settings"
+        }
+      },
+      "required": [
+        "mode",
+        "settings"
+      ],
+      "type": "object"
+    },
+    "ModeKind": {
+      "description": "Initial collaboration mode to use when the TUI starts.",
+      "enum": [
+        "plan",
+        "default"
+      ],
+      "type": "string"
+    },
+    "ReasoningEffort": {
+      "description": "A non-empty reasoning effort value advertised by the model.",
+      "minLength": 1,
+      "type": "string"
+    },
     "SandboxMode": {
       "enum": [
         "read-only",
@@ -70,6 +99,34 @@
         "danger-full-access"
       ],
       "type": "string"
+    },
+    "Settings": {
+      "description": "Settings for a collaboration mode.",
+      "properties": {
+        "developer_instructions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
     },
     "ThreadSource": {
       "type": "string"
@@ -103,6 +160,17 @@
         "string",
         "null"
       ]
+    },
+    "collaborationMode": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CollaborationMode"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Collaboration mode used to initialize the forked thread."
     },
     "config": {
       "additionalProperties": true,

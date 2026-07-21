@@ -79,10 +79,22 @@ pub(super) async fn list_threads(
         .map(|thread| (thread.thread_id, thread.history_mode))
         .collect::<HashMap<_, _>>();
     let names = resolve_thread_names(store, &thread_history_modes).await;
+    let mut collaboration_modes = HashMap::with_capacity(thread_history_modes.len());
+    if let Some(state_db_ctx) = store.state_db().await {
+        for &thread_id in thread_history_modes.keys() {
+            let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await else {
+                continue;
+            };
+            if let Some(collaboration_mode) = metadata.collaboration_mode {
+                collaboration_modes.insert(thread_id, collaboration_mode);
+            }
+        }
+    }
     for thread in &mut items {
         if let Some(name) = names.get(&thread.thread_id).cloned() {
             set_thread_name(thread, name);
         }
+        thread.collaboration_mode = collaboration_modes.remove(&thread.thread_id);
     }
 
     Ok(ThreadPage { items, next_cursor })

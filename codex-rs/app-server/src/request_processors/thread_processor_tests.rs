@@ -484,6 +484,7 @@ mod thread_processor_behavior_tests {
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Cli,
             history_mode: Default::default(),
+            collaboration_mode: None,
             thread_source: Some(codex_protocol::protocol::ThreadSource::User),
             agent_nickname: None,
             agent_role: None,

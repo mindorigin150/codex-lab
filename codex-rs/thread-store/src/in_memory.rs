@@ -138,6 +138,7 @@ mod tests {
                         cwd: None,
                         model_provider: "test-provider".to_string(),
                         memory_mode: ThreadMemoryMode::Enabled,
+                        collaboration_mode: None,
                     },
                 })
                 .await
@@ -337,6 +338,7 @@ mod tests {
             cwd: None,
             model_provider: "test-provider".to_string(),
             memory_mode: ThreadMemoryMode::Enabled,
+            collaboration_mode: None,
         }
     }
 
@@ -818,6 +820,9 @@ fn stored_thread_from_state(
             .and_then(|metadata| metadata.source.clone())
             .unwrap_or_else(|| created.source.clone()),
         history_mode: created.history_mode,
+        collaboration_mode: metadata
+            .and_then(|metadata| metadata.collaboration_mode.clone())
+            .or_else(|| created.metadata.collaboration_mode.clone()),
         thread_source: metadata
             .and_then(|metadata| metadata.thread_source.clone())
             .unwrap_or_else(|| created.thread_source.clone()),

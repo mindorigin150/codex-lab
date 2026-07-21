@@ -39,6 +39,7 @@ pub(super) async fn create_thread(
         )
         .with_session_id(params.session_id)
         .with_selected_capability_roots(params.selected_capability_roots)
+        .with_collaboration_mode(params.metadata.collaboration_mode)
         .with_multi_agent_version(params.multi_agent_version)
         .with_history_mode(params.history_mode)
         .with_subagent_history_start_ordinal(params.subagent_history_start_ordinal)

@@ -57,6 +57,7 @@ use crate::state_db;
 use crate::state_db::StateDbHandle;
 use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
+use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::protocol::GitInfo as ProtocolGitInfo;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -101,6 +102,7 @@ pub enum RolloutRecorderParams {
         base_instructions: BaseInstructions,
         dynamic_tools: Vec<DynamicToolSpec>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
+        collaboration_mode: Option<CollaborationMode>,
         multi_agent_version: Option<MultiAgentVersion>,
         history_mode: ThreadHistoryMode,
         subagent_history_start_ordinal: Option<u64>,
@@ -195,6 +197,7 @@ impl RolloutRecorderParams {
             base_instructions,
             dynamic_tools,
             selected_capability_roots: Vec::new(),
+            collaboration_mode: None,
             multi_agent_version: None,
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
@@ -219,6 +222,20 @@ impl RolloutRecorderParams {
         } = &mut self
         {
             *roots = selected_capability_roots;
+        }
+        self
+    }
+
+    pub fn with_collaboration_mode(
+        mut self,
+        collaboration_mode: Option<CollaborationMode>,
+    ) -> Self {
+        if let Self::Create {
+            collaboration_mode: mode,
+            ..
+        } = &mut self
+        {
+            *mode = collaboration_mode;
         }
         self
     }
@@ -788,6 +805,7 @@ impl RolloutRecorder {
                 base_instructions,
                 dynamic_tools,
                 selected_capability_roots,
+                collaboration_mode,
                 multi_agent_version,
                 history_mode,
                 subagent_history_start_ordinal,
@@ -830,6 +848,7 @@ impl RolloutRecorder {
                     },
                     selected_capability_roots,
                     memory_mode: (!config.generate_memories()).then_some("disabled".to_string()),
+                    collaboration_mode,
                     history_mode,
                     history_base: None,
                     subagent_history_start_ordinal,

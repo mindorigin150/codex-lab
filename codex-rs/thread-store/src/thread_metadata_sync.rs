@@ -36,6 +36,7 @@ pub(crate) struct ThreadMetadataSync {
     preview_seen: bool,
     first_user_message_seen: bool,
     title_seen: bool,
+    collaboration_mode_seen: bool,
     pending_update: Option<ThreadMetadataPatch>,
     pending_update_generation: u64,
     last_touch_persisted_at: Option<Instant>,
@@ -74,6 +75,7 @@ impl ThreadMetadataSync {
             cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             git_info: git_info.map(git_info_patch_from_observation),
             memory_mode: Some(params.metadata.memory_mode),
+            collaboration_mode: params.metadata.collaboration_mode.clone(),
             ..Default::default()
         };
         Self {
@@ -82,6 +84,7 @@ impl ThreadMetadataSync {
             preview_seen: false,
             first_user_message_seen: false,
             title_seen: false,
+            collaboration_mode_seen: params.metadata.collaboration_mode.is_some(),
             pending_update: Some(update),
             pending_update_generation: 1,
             last_touch_persisted_at: None,
@@ -101,6 +104,7 @@ impl ThreadMetadataSync {
             preview_seen: false,
             first_user_message_seen: false,
             title_seen: false,
+            collaboration_mode_seen: false,
             pending_update: None,
             pending_update_generation: 0,
             last_touch_persisted_at: None,
@@ -230,6 +234,10 @@ impl ThreadMetadataSync {
                     {
                         update.model_provider = Some(model_provider);
                     }
+                    if let Some(collaboration_mode) = meta_line.meta.collaboration_mode.clone() {
+                        self.collaboration_mode_seen = true;
+                        update.collaboration_mode = Some(collaboration_mode);
+                    }
                     if !meta_line.meta.cli_version.is_empty() {
                         update.cli_version = Some(meta_line.meta.cli_version.clone());
                     }
@@ -253,6 +261,12 @@ impl ThreadMetadataSync {
                     }
                     update.model = Some(turn_ctx.model.clone());
                     update.reasoning_effort = Some(turn_ctx.effort.clone());
+                    if !self.collaboration_mode_seen
+                        && let Some(collaboration_mode) = turn_ctx.collaboration_mode.clone()
+                    {
+                        self.collaboration_mode_seen = true;
+                        update.collaboration_mode = Some(collaboration_mode);
+                    }
                     update.approval_mode = Some(turn_ctx.approval_policy);
                     update.permission_profile = Some(turn_ctx.permission_profile());
                 }
@@ -290,6 +304,8 @@ impl ThreadMetadataSync {
                     update.cwd = Some(settings.cwd.clone().into_path_buf());
                     update.approval_mode = Some(settings.approval_policy);
                     update.permission_profile = Some(settings.permission_profile.clone());
+                    self.collaboration_mode_seen = true;
+                    update.collaboration_mode = Some(settings.collaboration_mode.clone());
                 }
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::EventMsg(_)
@@ -367,6 +383,7 @@ fn update_has_metadata_facts(update: &ThreadMetadataPatch) -> bool {
         || update.model_provider.is_some()
         || update.model.is_some()
         || update.reasoning_effort.is_some()
+        || update.collaboration_mode.is_some()
         || update.created_at.is_some()
         || update.advance_recency_at.is_some()
         || update.source.is_some()
@@ -407,6 +424,7 @@ mod tests {
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::CompactedItem;
     use codex_protocol::protocol::ItemCompletedEvent;
+    use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionMeta;
     use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionSource;
@@ -415,6 +433,7 @@ mod tests {
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
     use codex_protocol::protocol::ThreadSettingsAppliedEvent;
     use codex_protocol::protocol::ThreadSettingsSnapshot;
+    use codex_protocol::protocol::TurnContextItem;
     use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_protocol::user_input::UserInput;
@@ -457,6 +476,63 @@ mod tests {
 
         sync.mark_pending_update_applied(&update);
         assert!(sync.take_pending_update().is_none());
+    }
+
+    #[test]
+    fn resume_history_prefers_session_collaboration_mode_over_copied_turn_context() {
+        let thread_id = ThreadId::new();
+        let initial_mode = CollaborationMode {
+            mode: ModeKind::Plan,
+            settings: Settings {
+                model: "gpt-5.4".to_string(),
+                reasoning_effort: Some(ReasoningEffort::High),
+                developer_instructions: Some("initial plan".to_string()),
+            },
+        };
+        let current_mode = CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                model: "gpt-5.4".to_string(),
+                reasoning_effort: None,
+                developer_instructions: Some("latest mode".to_string()),
+            },
+        };
+        let mut meta = session_meta(thread_id);
+        meta.meta.collaboration_mode = Some(initial_mode.clone());
+        let sync = ThreadMetadataSync::for_resume(&resume_params(
+            thread_id,
+            vec![
+                RolloutItem::SessionMeta(meta),
+                RolloutItem::TurnContext(TurnContextItem {
+                    turn_id: Some("turn-1".to_string()),
+                    cwd: serde_json::from_value(serde_json::json!(
+                        std::env::current_dir().expect("current directory")
+                    ))
+                    .expect("absolute cwd"),
+                    workspace_roots: None,
+                    current_date: None,
+                    timezone: None,
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: None,
+                    sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                    permission_profile: None,
+                    network: None,
+                    file_system_sandbox_policy: None,
+                    model: "gpt-5.4".to_string(),
+                    comp_hash: None,
+                    personality: None,
+                    collaboration_mode: Some(current_mode),
+                    multi_agent_version: None,
+                    multi_agent_mode: None,
+                    realtime_active: None,
+                    effort: None,
+                    summary: ReasoningSummary::Auto,
+                }),
+            ],
+        ));
+
+        let update = sync.take_pending_update().expect("pending metadata update");
+        assert_eq!(update.patch.collaboration_mode, Some(initial_mode));
     }
 
     #[test]
@@ -592,6 +668,14 @@ mod tests {
             .expect("current directory")
             .join("updated/workspace");
 
+        let collaboration_mode = CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                model: "gpt-5.2-codex".to_string(),
+                reasoning_effort: Some(ReasoningEffort::Ultra),
+                developer_instructions: None,
+            },
+        };
         let mut item = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
             ThreadSettingsAppliedEvent {
                 thread_settings: ThreadSettingsSnapshot {
@@ -606,14 +690,7 @@ mod tests {
                     reasoning_effort: Some(ReasoningEffort::Ultra),
                     reasoning_summary: Some(ReasoningSummary::Auto),
                     personality: None,
-                    collaboration_mode: CollaborationMode {
-                        mode: ModeKind::Default,
-                        settings: Settings {
-                            model: "gpt-5.2-codex".to_string(),
-                            reasoning_effort: Some(ReasoningEffort::Ultra),
-                            developer_instructions: None,
-                        },
-                    },
+                    collaboration_mode: collaboration_mode.clone(),
                 },
             },
         ));
@@ -634,6 +711,7 @@ mod tests {
         assert_eq!(update.patch.cwd, Some(cwd));
         assert_eq!(update.patch.approval_mode, Some(AskForApproval::Never));
         assert_eq!(update.patch.permission_profile, Some(permission_profile));
+        assert_eq!(update.patch.collaboration_mode, Some(collaboration_mode));
 
         let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
             panic!("thread settings applied item");
@@ -710,6 +788,7 @@ mod tests {
                 cwd: None,
                 model_provider: "test-provider".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
+                collaboration_mode: None,
             },
         }
     }

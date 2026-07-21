@@ -630,6 +630,9 @@ impl Session {
                                 } else {
                                     ThreadMemoryMode::Disabled
                                 },
+                                collaboration_mode: Some(
+                                    session_configuration.collaboration_mode.clone(),
+                                ),
                             },
                         };
                         if is_paginated_subagent
@@ -659,6 +662,9 @@ impl Session {
                                 } else {
                                     ThreadMemoryMode::Disabled
                                 },
+                                collaboration_mode: Some(
+                                    session_configuration.collaboration_mode.clone(),
+                                ),
                             },
                         };
                         LiveThread::resume(

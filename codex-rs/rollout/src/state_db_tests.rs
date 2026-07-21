@@ -228,6 +228,7 @@ fn write_rollout_with_user_message(
                     dynamic_tools: None,
                     selected_capability_roots: Vec::new(),
                     memory_mode: None,
+                    collaboration_mode: None,
                     history_mode,
                     history_base: None,
                     subagent_history_start_ordinal: None,

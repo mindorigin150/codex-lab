@@ -177,6 +177,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             dynamic_tools: None,
             selected_capability_roots: Vec::new(),
             memory_mode: None,
+            collaboration_mode: None,
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,

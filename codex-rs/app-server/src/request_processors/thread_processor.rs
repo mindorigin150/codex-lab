@@ -952,6 +952,7 @@ impl ThreadRequestProcessor {
             model_provider,
             allow_provider_model_fallback,
             service_tier,
+            collaboration_mode,
             cwd,
             runtime_workspace_roots,
             approval_policy,
@@ -1040,6 +1041,7 @@ impl ThreadRequestProcessor {
                 environments,
                 service_name,
                 allow_provider_model_fallback,
+                collaboration_mode,
                 experimental_raw_events,
                 request_trace,
                 initial_config_warnings,
@@ -1117,6 +1119,7 @@ impl ThreadRequestProcessor {
         environment_selections: Option<Vec<TurnEnvironmentSelection>>,
         service_name: Option<String>,
         allow_provider_model_fallback: bool,
+        initial_collaboration_mode: Option<codex_protocol::config_types::CollaborationMode>,
         experimental_raw_events: bool,
         request_trace: Option<W3cTraceContext>,
         initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
@@ -1236,25 +1239,32 @@ impl ThreadRequestProcessor {
             ..
         } = listener_task_context
             .thread_manager
-            .start_thread_with_options(StartThreadOptions {
-                config,
-                allow_provider_model_fallback,
-                initial_history: match session_start_source
-                    .unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
-                {
-                    codex_app_server_protocol::ThreadStartSource::Startup => InitialHistory::New,
-                    codex_app_server_protocol::ThreadStartSource::Clear => InitialHistory::Cleared,
+            .start_thread_with_options_and_collaboration_mode(
+                StartThreadOptions {
+                    config,
+                    allow_provider_model_fallback,
+                    initial_history: match session_start_source
+                        .unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
+                    {
+                        codex_app_server_protocol::ThreadStartSource::Startup => {
+                            InitialHistory::New
+                        }
+                        codex_app_server_protocol::ThreadStartSource::Clear => {
+                            InitialHistory::Cleared
+                        }
+                    },
+                    history_mode,
+                    session_source: None,
+                    thread_source,
+                    dynamic_tools,
+                    metrics_service_name: service_name,
+                    parent_trace: request_trace,
+                    environments,
+                    thread_extension_init,
+                    supports_openai_form_elicitation,
                 },
-                history_mode,
-                session_source: None,
-                thread_source,
-                dynamic_tools,
-                metrics_service_name: service_name,
-                parent_trace: request_trace,
-                environments,
-                thread_extension_init,
-                supports_openai_form_elicitation,
-            })
+                initial_collaboration_mode,
+            )
             .instrument(tracing::info_span!(
                 "app_server.thread_start.create_thread",
                 otel.name = "app_server.thread_start.create_thread",
@@ -2443,6 +2453,9 @@ impl ThreadRequestProcessor {
             thread.ephemeral = fallback_thread.ephemeral;
             thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
             thread
+                .collaboration_mode
+                .clone_from(&fallback_thread.collaboration_mode);
+            thread
         } else {
             fallback_thread
         };
@@ -3179,17 +3192,21 @@ impl ThreadRequestProcessor {
         {
             config.model_reasoning_effort = None;
         }
+        let initial_collaboration_mode = persisted_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.collaboration_mode.clone());
 
         let response_history = thread_history.clone();
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_and_collaboration_mode(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(&request_id).await,
                 supports_openai_form_elicitation,
+                initial_collaboration_mode,
             )
             .await
         {
@@ -3273,11 +3290,9 @@ impl ThreadRequestProcessor {
                         return Ok(());
                     }
                 };
-                thread.thread_source = codex_thread
-                    .config_snapshot()
-                    .await
-                    .thread_source
-                    .map(Into::into);
+                let config_snapshot = codex_thread.config_snapshot().await;
+                thread.thread_source = config_snapshot.thread_source.clone().map(Into::into);
+                thread.collaboration_mode = Some(config_snapshot.collaboration_mode.clone());
                 if let Some(materialized_turns) = materialized_turns {
                     thread.turns = materialized_turns;
                 }
@@ -3294,7 +3309,6 @@ impl ThreadRequestProcessor {
                     thread_status,
                     /*has_live_in_progress_turn*/ false,
                 );
-                let config_snapshot = codex_thread.config_snapshot().await;
                 let (turns_backwards_cursor, items_backwards_cursor) =
                     if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
                         match Self::paginated_resume_backwards_cursors(
@@ -3593,6 +3607,7 @@ impl ThreadRequestProcessor {
                 existing_thread.multi_agent_version(),
                 &config_snapshot.session_source,
             ));
+            thread_summary.collaboration_mode = Some(config_snapshot.collaboration_mode.clone());
             let instruction_sources = existing_thread.legacy_instruction_sources().await;
 
             let listener_command_tx = {
@@ -3974,6 +3989,7 @@ impl ThreadRequestProcessor {
             model,
             model_provider,
             service_tier,
+            collaboration_mode,
             cwd,
             runtime_workspace_roots,
             approval_policy,
@@ -4018,6 +4034,12 @@ impl ThreadRequestProcessor {
             .read_stored_thread_for_resume(&thread_id, path.as_ref(), /*include_history*/ true)
             .await?;
         let source_thread_id = source_thread.thread_id;
+        let source_collaboration_mode = match self.thread_manager.get_thread(source_thread_id).await
+        {
+            Ok(thread) => Some(thread.config_snapshot().await.collaboration_mode),
+            Err(_) => source_thread.collaboration_mode.clone(),
+        };
+        let initial_collaboration_mode = collaboration_mode.or(source_collaboration_mode);
         let source_thread_name = source_thread
             .name
             .as_deref()
@@ -4100,7 +4122,7 @@ impl ThreadRequestProcessor {
             ..
         } = self
             .thread_manager
-            .fork_thread_from_history(
+            .fork_thread_from_history_and_collaboration_mode(
                 ForkSnapshot::Interrupted,
                 config,
                 InitialHistory::Resumed(ResumedHistory {
@@ -4111,6 +4133,7 @@ impl ThreadRequestProcessor {
                 thread_source.map(Into::into),
                 self.request_trace_context(&request_id).await,
                 supports_openai_form_elicitation,
+                initial_collaboration_mode,
             )
             .await
             .map_err(|err| match err {
@@ -4975,6 +4998,7 @@ pub(crate) fn thread_from_stored_thread(
         preview: thread.preview,
         ephemeral: false,
         history_mode: thread.history_mode.into(),
+        collaboration_mode: thread.collaboration_mode,
         model_provider: if thread.model_provider.is_empty() {
             fallback_provider.to_string()
         } else {
@@ -5186,6 +5210,7 @@ fn build_thread_from_snapshot(
         preview: String::new(),
         ephemeral: config_snapshot.ephemeral,
         history_mode: config_snapshot.history_mode.into(),
+        collaboration_mode: Some(config_snapshot.collaboration_mode.clone()),
         model_provider: config_snapshot.model_provider_id.clone(),
         created_at: now,
         updated_at: now,

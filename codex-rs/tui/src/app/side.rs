@@ -574,8 +574,13 @@ impl App {
             .await;
 
         let fork_config = self.side_fork_config();
+        let collaboration_mode = self.chat_widget.effective_collaboration_mode();
         match app_server
-            .fork_side_thread(fork_config, parent_thread_id)
+            .fork_side_thread_with_collaboration_mode(
+                fork_config,
+                parent_thread_id,
+                collaboration_mode,
+            )
             .await
         {
             Ok(forked) => {

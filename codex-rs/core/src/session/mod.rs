@@ -445,6 +445,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) external_time_provider: Option<Arc<dyn TimeProvider>>,
     pub(crate) inherited_multi_agent_version: Option<MultiAgentVersion>,
+    pub(crate) initial_collaboration_mode: Option<CollaborationMode>,
 }
 
 pub(crate) fn resolve_multi_agent_version(
@@ -533,6 +534,7 @@ impl Session {
             attestation_provider,
             external_time_provider,
             inherited_multi_agent_version,
+            initial_collaboration_mode,
         } = args;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
@@ -639,14 +641,14 @@ impl Session {
         };
         // TODO (aibrahim): Consolidate config.model and config.model_reasoning_effort into config.collaboration_mode
         // to avoid extracting these fields separately and constructing CollaborationMode here.
-        let collaboration_mode = CollaborationMode {
+        let collaboration_mode = initial_collaboration_mode.unwrap_or_else(|| CollaborationMode {
             mode: ModeKind::Default,
             settings: Settings {
                 model: model.clone(),
                 reasoning_effort: config.model_reasoning_effort.clone(),
                 developer_instructions: None,
             },
-        };
+        });
         let fast_mode_enabled = config.features.enabled(Feature::FastMode);
         let initial_service_tier_warning = unsupported_service_tier_warning(
             config.service_tier.as_deref(),
@@ -1349,6 +1351,13 @@ impl Session {
                     rollout_items.push(thread_settings_applied);
                     self.persist_rollout_items(&rollout_items).await;
                 }
+
+                // The copied prefix may end with source-owned settings events. Persist the
+                // fork's applied settings after that prefix so replay and metadata rebuilds
+                // retain the fork's own mode and permissions.
+                let settings_event = handlers::thread_settings_applied_event(self).await;
+                self.persist_rollout_items(&[RolloutItem::EventMsg(settings_event)])
+                    .await;
 
                 // Forked threads should remain file-backed immediately after startup.
                 self.ensure_rollout_materialized().await;

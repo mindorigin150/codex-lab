@@ -3724,6 +3724,17 @@
           "description": "Version of the CLI that created the thread.",
           "type": "string"
         },
+        "collaborationMode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CollaborationMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Last selected collaboration mode, when persisted or currently loaded."
+        },
         "createdAt": {
           "description": "Unix timestamp (in seconds) when the thread was created.",
           "format": "int64",

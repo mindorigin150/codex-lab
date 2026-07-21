@@ -327,6 +327,7 @@ impl ExternalAgentSessionImporter {
                 cwd: Some(cwd.clone()),
                 model_provider: model_provider.clone(),
                 memory_mode,
+                collaboration_mode: None,
             },
         };
         rollout_items.retain(|item| is_persisted_rollout_item(item, ThreadHistoryMode::Legacy));

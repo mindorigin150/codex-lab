@@ -72,6 +72,9 @@ fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &Sessi
     if let Some(provider) = meta_line.meta.model_provider.as_deref() {
         metadata.model_provider = provider.to_string();
     }
+    if let Some(collaboration_mode) = meta_line.meta.collaboration_mode.as_ref() {
+        metadata.collaboration_mode = Some(collaboration_mode.clone());
+    }
     if !meta_line.meta.cli_version.is_empty() {
         metadata.cli_version = meta_line.meta.cli_version.clone();
     }
@@ -91,6 +94,13 @@ fn apply_turn_context(metadata: &mut ThreadMetadata, turn_ctx: &TurnContextItem)
     }
     metadata.model = Some(turn_ctx.model.clone());
     metadata.reasoning_effort = turn_ctx.effort.clone();
+    // Session metadata and settings-applied events are authoritative. Turn context is a
+    // compatibility source for rollouts created before collaboration mode was persisted there.
+    if metadata.collaboration_mode.is_none()
+        && let Some(collaboration_mode) = turn_ctx.collaboration_mode.as_ref()
+    {
+        metadata.collaboration_mode = Some(collaboration_mode.clone());
+    }
     metadata.sandbox_policy =
         serde_json::to_string(&turn_ctx.permission_profile()).unwrap_or_default();
     metadata.approval_mode = enum_to_string(&turn_ctx.approval_policy);
@@ -122,6 +132,7 @@ fn apply_event_msg(metadata: &mut ThreadMetadata, event: &EventMsg) {
             metadata.model = Some(settings.model.clone());
             metadata.model_provider = settings.model_provider_id.clone();
             metadata.reasoning_effort = settings.reasoning_effort.clone();
+            metadata.collaboration_mode = Some(settings.collaboration_mode.clone());
             metadata.cwd = settings.cwd.clone().into_path_buf();
             metadata.sandbox_policy =
                 serde_json::to_string(&settings.permission_profile).unwrap_or_default();
@@ -401,6 +412,7 @@ mod tests {
                     dynamic_tools: None,
                     selected_capability_roots: Vec::new(),
                     memory_mode: None,
+                    collaboration_mode: None,
                     history_mode: Default::default(),
                     history_base: None,
                     subagent_history_start_ordinal: None,
@@ -537,6 +549,14 @@ mod tests {
     #[test]
     fn turn_context_sets_model_and_reasoning_effort() {
         let mut metadata = metadata_for_test();
+        let collaboration_mode = CollaborationMode {
+            mode: ModeKind::Plan,
+            settings: Settings {
+                model: "gpt-5".to_string(),
+                reasoning_effort: Some(ReasoningEffort::High),
+                developer_instructions: Some("plan from rollout".to_string()),
+            },
+        };
 
         apply_rollout_item(
             &mut metadata,
@@ -560,7 +580,7 @@ mod tests {
                 model: "gpt-5".to_string(),
                 comp_hash: None,
                 personality: None,
-                collaboration_mode: None,
+                collaboration_mode: Some(collaboration_mode.clone()),
                 multi_agent_version: None,
                 multi_agent_mode: None,
                 realtime_active: None,
@@ -572,6 +592,7 @@ mod tests {
 
         assert_eq!(metadata.model.as_deref(), Some("gpt-5"));
         assert_eq!(metadata.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(metadata.collaboration_mode, Some(collaboration_mode));
     }
 
     #[test]
@@ -613,6 +634,17 @@ mod tests {
         assert_eq!(metadata.model.as_deref(), Some("gpt-5.2-codex"));
         assert_eq!(metadata.model_provider, "updated-provider");
         assert_eq!(metadata.reasoning_effort, Some(ReasoningEffort::Ultra));
+        assert_eq!(
+            metadata.collaboration_mode,
+            Some(CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: "gpt-5.2-codex".to_string(),
+                    reasoning_effort: Some(ReasoningEffort::Ultra),
+                    developer_instructions: None,
+                },
+            })
+        );
         assert_eq!(metadata.cwd, cwd);
         assert_eq!(metadata.approval_mode, "never");
         assert_eq!(
@@ -623,10 +655,18 @@ mod tests {
     }
 
     #[test]
-    fn session_meta_does_not_set_model_or_reasoning_effort() {
+    fn session_meta_sets_collaboration_mode_without_model_or_reasoning_effort() {
         let mut metadata = metadata_for_test();
         metadata.history_mode = ThreadHistoryMode::Paginated;
         let thread_id = metadata.id;
+        let collaboration_mode = CollaborationMode {
+            mode: ModeKind::Plan,
+            settings: Settings {
+                model: "gpt-5.4".to_string(),
+                reasoning_effort: Some(ReasoningEffort::High),
+                developer_instructions: Some("initial plan".to_string()),
+            },
+        };
 
         apply_rollout_item(
             &mut metadata,
@@ -650,6 +690,7 @@ mod tests {
                     dynamic_tools: None,
                     selected_capability_roots: Vec::new(),
                     memory_mode: None,
+                    collaboration_mode: Some(collaboration_mode.clone()),
                     history_mode: ThreadHistoryMode::Legacy,
                     history_base: None,
                     subagent_history_start_ordinal: None,
@@ -663,6 +704,7 @@ mod tests {
 
         assert_eq!(metadata.model, None);
         assert_eq!(metadata.reasoning_effort, None);
+        assert_eq!(metadata.collaboration_mode, Some(collaboration_mode));
         assert_eq!(metadata.history_mode, ThreadHistoryMode::Paginated);
     }
 
@@ -677,6 +719,7 @@ mod tests {
             recency_at: created_at,
             source: "cli".to_string(),
             history_mode: Default::default(),
+            collaboration_mode: None,
             thread_source: None,
             agent_path: None,
             agent_nickname: None,

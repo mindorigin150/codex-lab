@@ -179,7 +179,15 @@ impl App {
                     fork_config.model = Some(self.chat_widget.current_model().to_string());
                     fork_config.model_reasoning_effort =
                         self.chat_widget.current_reasoning_effort();
-                    match app_server.fork_thread(fork_config, thread_id).await {
+                    let collaboration_mode = self.chat_widget.effective_collaboration_mode();
+                    match app_server
+                        .fork_thread_with_collaboration_mode(
+                            fork_config,
+                            thread_id,
+                            collaboration_mode,
+                        )
+                        .await
+                    {
                         Ok(forked) => {
                             self.shutdown_current_thread(app_server).await;
                             match self
@@ -245,6 +253,7 @@ impl App {
                 self.refresh_in_memory_config_from_disk_best_effort("forking the thread")
                     .await;
                 let config = self.fresh_session_config();
+                let collaboration_mode = self.chat_widget.effective_collaboration_mode();
                 let started = match app_server
                     .thread_read(thread_id, /*include_turns*/ true)
                     .await
@@ -256,19 +265,21 @@ impl App {
                     ) {
                         Ok(Some(before_turn_id)) => {
                             app_server
-                                .fork_thread_at(
+                                .fork_thread_at_with_collaboration_mode(
                                     config.clone(),
                                     thread_id,
                                     /*last_turn_id*/ None,
                                     /*before_turn_id*/ Some(before_turn_id),
                                     ForkGoalContinuation::StartIfIdle,
+                                    collaboration_mode.clone(),
                                 )
                                 .await
                         }
                         Ok(None) => {
                             app_server
-                                .start_thread_with_session_start_source(
-                                    &config, /*session_start_source*/ None,
+                                .start_thread_with_collaboration_mode(
+                                    &config,
+                                    collaboration_mode.clone(),
                                 )
                                 .await
                         }

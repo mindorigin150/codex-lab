@@ -44,6 +44,7 @@ fn write_rollout_with_metadata(path: &Path, thread_id: ThreadId) -> std::io::Res
                 dynamic_tools: None,
                 selected_capability_roots: Vec::new(),
                 memory_mode: None,
+                collaboration_mode: None,
                 history_mode: Default::default(),
                 history_base: None,
                 subagent_history_start_ordinal: None,

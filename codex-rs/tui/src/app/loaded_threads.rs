@@ -143,6 +143,7 @@ mod tests {
             preview: String::new(),
             ephemeral: false,
             history_mode: Default::default(),
+            collaboration_mode: None,
             model_provider: "openai".to_string(),
             created_at: 0,
             updated_at: 0,

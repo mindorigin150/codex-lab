@@ -119,10 +119,7 @@ async fn fork_thread_twice_drops_to_first_message() {
 
     // GetHistory on fork1 flushed; the file is ready.
     let fork1_items = read_rollout_items(&fork1_path);
-    pretty_assertions::assert_eq!(
-        serde_json::to_value(&fork1_items).unwrap(),
-        serde_json::to_value(&expected_after_first).unwrap()
-    );
+    assert_fork_rollout_prefix(&fork1_items, &expected_after_first);
 
     // Fork again with n=0 → drops the (new) last user message, leaving only the first.
     let NewThread {
@@ -152,10 +149,7 @@ async fn fork_thread_twice_drops_to_first_message() {
         codex_fork2.config_snapshot().await,
     ));
     let fork2_items = read_rollout_items(&fork2_path);
-    pretty_assertions::assert_eq!(
-        serde_json::to_value(&fork2_items).unwrap(),
-        serde_json::to_value(&expected_after_second).unwrap()
-    );
+    assert_fork_rollout_prefix(&fork2_items, &expected_after_second);
 }
 
 fn thread_settings_applied_item(snapshot: ThreadConfigSnapshot) -> RolloutItem {
@@ -258,4 +252,18 @@ fn read_rollout_items(path: &std::path::Path) -> Vec<RolloutItem> {
         }
     }
     items
+}
+
+fn assert_fork_rollout_prefix(actual: &[RolloutItem], expected_prefix: &[RolloutItem]) {
+    let (settings, copied_prefix) = actual
+        .split_last()
+        .expect("fork rollout should contain its settings boundary");
+    assert!(matches!(
+        settings,
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+    ));
+    pretty_assertions::assert_eq!(
+        serde_json::to_value(copied_prefix).expect("serialize copied fork prefix"),
+        serde_json::to_value(expected_prefix).expect("serialize expected fork prefix")
+    );
 }

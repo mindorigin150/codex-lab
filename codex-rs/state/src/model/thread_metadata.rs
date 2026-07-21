@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
@@ -90,6 +91,8 @@ pub struct ThreadMetadata {
     pub source: String,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
+    /// Last explicitly selected collaboration mode, if known.
+    pub collaboration_mode: Option<CollaborationMode>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
@@ -149,6 +152,8 @@ pub struct ThreadMetadataBuilder {
     pub source: SessionSource,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
+    /// Last explicitly selected collaboration mode, if known.
+    pub collaboration_mode: Option<CollaborationMode>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Optional random unique nickname assigned to the session.
@@ -193,6 +198,7 @@ impl ThreadMetadataBuilder {
             recency_at: None,
             source,
             history_mode: ThreadHistoryMode::Legacy,
+            collaboration_mode: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -231,6 +237,7 @@ impl ThreadMetadataBuilder {
             recency_at,
             source,
             history_mode: self.history_mode,
+            collaboration_mode: self.collaboration_mode.clone(),
             thread_source: self.thread_source.clone(),
             agent_nickname: self.agent_nickname.clone(),
             agent_role: self.agent_role.clone(),
@@ -394,6 +401,7 @@ pub(crate) struct ThreadRow {
     recency_at: i64,
     source: String,
     history_mode: String,
+    collaboration_mode: Option<String>,
     thread_source: Option<String>,
     agent_nickname: Option<String>,
     agent_role: Option<String>,
@@ -426,6 +434,7 @@ impl ThreadRow {
             recency_at: row.try_get("recency_at")?,
             source: row.try_get("source")?,
             history_mode: row.try_get("history_mode")?,
+            collaboration_mode: row.try_get("collaboration_mode")?,
             thread_source: row.try_get("thread_source")?,
             agent_nickname: row.try_get("agent_nickname")?,
             agent_role: row.try_get("agent_role")?,
@@ -462,6 +471,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             recency_at,
             source,
             history_mode,
+            collaboration_mode,
             thread_source,
             agent_nickname,
             agent_role,
@@ -488,6 +498,9 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             .transpose()
             .map_err(anyhow::Error::msg)?;
         let history_mode = history_mode.parse().map_err(anyhow::Error::msg)?;
+        let collaboration_mode = collaboration_mode
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?;
         Ok(Self {
             id: ThreadId::try_from(id)?,
             rollout_path: PathBuf::from(rollout_path),
@@ -496,6 +509,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             recency_at: epoch_millis_to_datetime(recency_at)?,
             source,
             history_mode,
+            collaboration_mode,
             thread_source,
             agent_nickname,
             agent_role,
@@ -595,6 +609,7 @@ mod tests {
             recency_at: 1_700_000_100,
             source: "cli".to_string(),
             history_mode: "legacy".to_string(),
+            collaboration_mode: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -628,6 +643,7 @@ mod tests {
             recency_at: DateTime::<Utc>::from_timestamp(1_700_000_100, 0).expect("timestamp"),
             source: "cli".to_string(),
             history_mode: ThreadHistoryMode::Legacy,
+            collaboration_mode: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,

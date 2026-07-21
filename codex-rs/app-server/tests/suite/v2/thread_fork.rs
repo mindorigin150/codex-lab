@@ -22,6 +22,9 @@ use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSettingsUpdateParams;
+use codex_app_server_protocol::ThreadSettingsUpdateResponse;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -35,6 +38,9 @@ use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
@@ -259,6 +265,226 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let mut expected_started_thread = thread;
     expected_started_thread.turns.clear();
     assert_eq!(started.thread, expected_started_thread);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_fork_inherits_persisted_collaboration_mode_unless_overridden() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    let sqlite_home = TempDir::new()?;
+    let sqlite_home_path = sqlite_home
+        .path()
+        .to_str()
+        .expect("test sqlite home should be utf-8");
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let source_mode = CollaborationMode {
+        mode: ModeKind::Plan,
+        settings: Settings {
+            model: "gpt-5.4".to_string(),
+            reasoning_effort: None,
+            developer_instructions: Some("source plan instructions".to_string()),
+        },
+    };
+    let updated_source_mode = CollaborationMode {
+        mode: ModeKind::Plan,
+        settings: Settings {
+            model: "gpt-5.4".to_string(),
+            reasoning_effort: None,
+            developer_instructions: Some("updated source plan instructions".to_string()),
+        },
+    };
+    let override_mode = CollaborationMode {
+        mode: ModeKind::Default,
+        settings: Settings {
+            model: "gpt-5.4".to_string(),
+            reasoning_effort: None,
+            developer_instructions: Some("fork override instructions".to_string()),
+        },
+    };
+
+    let source_thread_id = {
+        let mut mcp = TestAppServer::builder()
+            .with_codex_home(codex_home.path())
+            .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(sqlite_home_path))])
+            .build()
+            .await?;
+        timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+        let start_id = mcp
+            .send_thread_start_request_with_auto_env(ThreadStartParams {
+                collaboration_mode: Some(source_mode.clone()),
+                ..Default::default()
+            })
+            .await?;
+        let start_resp: JSONRPCResponse = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+        )
+        .await??;
+        let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+        assert_eq!(thread.collaboration_mode, Some(source_mode.clone()));
+
+        let turn_id = mcp
+            .send_turn_start_request(TurnStartParams {
+                thread_id: thread.id.clone(),
+                client_user_message_id: None,
+                input: vec![UserInput::Text {
+                    text: "materialize source mode".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .await?;
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
+        )
+        .await??;
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("turn/completed"),
+        )
+        .await??;
+
+        let update_id = mcp
+            .send_thread_settings_update_request(ThreadSettingsUpdateParams {
+                thread_id: thread.id.clone(),
+                collaboration_mode: Some(updated_source_mode.clone()),
+                ..Default::default()
+            })
+            .await?;
+        let update_resp: JSONRPCResponse = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(update_id)),
+        )
+        .await??;
+        let _: ThreadSettingsUpdateResponse = to_response(update_resp)?;
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("thread/settings/updated"),
+        )
+        .await??;
+
+        let list_id = mcp
+            .send_thread_list_request(ThreadListParams {
+                cursor: None,
+                limit: Some(50),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: None,
+                source_kinds: None,
+                archived: None,
+                cwd: None,
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            })
+            .await?;
+        let list_resp: JSONRPCResponse = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(list_id)),
+        )
+        .await??;
+        let listed = to_response::<ThreadListResponse>(list_resp)?
+            .data
+            .into_iter()
+            .find(|listed| listed.id == thread.id)
+            .expect("materialized source thread should be present in the state DB");
+        assert_eq!(listed.collaboration_mode, Some(updated_source_mode.clone()));
+
+        thread.id
+    };
+
+    std::fs::remove_file(codex_state::state_db_path(sqlite_home.path()))?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(sqlite_home_path))])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let inherited_fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: source_thread_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let inherited_fork_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(inherited_fork_id)),
+    )
+    .await??;
+    let ThreadForkResponse {
+        thread: inherited_fork,
+        ..
+    } = to_response::<ThreadForkResponse>(inherited_fork_resp)?;
+    assert_eq!(
+        inherited_fork.collaboration_mode,
+        Some(updated_source_mode.clone())
+    );
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: source_thread_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
+    assert_eq!(thread.collaboration_mode, Some(updated_source_mode.clone()));
+
+    let overridden_fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: source_thread_id,
+            collaboration_mode: Some(override_mode.clone()),
+            ..Default::default()
+        })
+        .await?;
+    let overridden_fork_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(overridden_fork_id)),
+    )
+    .await??;
+    let ThreadForkResponse {
+        thread: overridden_fork,
+        ..
+    } = to_response::<ThreadForkResponse>(overridden_fork_resp)?;
+    let overridden_fork_thread_id = overridden_fork.id.clone();
+    assert_eq!(
+        overridden_fork.collaboration_mode,
+        Some(override_mode.clone())
+    );
+    drop(mcp);
+
+    std::fs::remove_file(codex_state::state_db_path(sqlite_home.path()))?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(sqlite_home_path))])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: overridden_fork_thread_id,
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
+    assert_eq!(thread.collaboration_mode, Some(override_mode));
 
     Ok(())
 }
