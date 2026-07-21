@@ -75,7 +75,7 @@ pub(crate) async fn read_summary_from_rollout(
         model_provider,
         cwd: session_meta.cwd,
         cli_version: session_meta.cli_version,
-        source: session_meta.source,
+        source: session_meta.source.into(),
         git_info,
     })
 }
@@ -121,7 +121,7 @@ fn extract_conversation_summary(
         model_provider,
         cwd: session_meta.cwd.clone(),
         cli_version: session_meta.cli_version.clone(),
-        source: session_meta.source.clone(),
+        source: session_meta.source.clone().into(),
         git_info,
     })
 }
@@ -152,6 +152,7 @@ pub(super) fn with_thread_spawn_agent_metadata(
                 agent_path,
                 agent_nickname: existing_agent_nickname,
                 agent_role: existing_agent_role,
+                agent_role_provenance: None,
             },
         ) => codex_protocol::protocol::SessionSource::SubAgent(
             codex_protocol::protocol::SubAgentSource::ThreadSpawn {
@@ -160,6 +161,7 @@ pub(super) fn with_thread_spawn_agent_metadata(
                 agent_path,
                 agent_nickname: agent_nickname.or(existing_agent_nickname),
                 agent_role: agent_role.or(existing_agent_role),
+                agent_role_provenance: None,
             },
         ),
         _ => source,
@@ -297,6 +299,17 @@ pub(crate) fn summary_to_thread(
                 );
                 fallback_cwd.clone()
             });
+    let (agent_nickname, agent_role) = match &source {
+        codex_app_server_protocol::ConversationSessionSource::SubAgent(
+            codex_app_server_protocol::ConversationSubAgentSource::ThreadSpawn {
+                agent_nickname,
+                agent_role,
+                ..
+            },
+        ) => (agent_nickname.clone(), agent_role.clone()),
+        _ => (None, None),
+    };
+    let core_source: codex_protocol::protocol::SessionSource = source.into();
 
     let thread_id = conversation_id.to_string();
     Thread {
@@ -317,9 +330,9 @@ pub(crate) fn summary_to_thread(
         path: (!path.as_os_str().is_empty()).then_some(path),
         cwd,
         cli_version,
-        agent_nickname: source.get_nickname(),
-        agent_role: source.get_agent_role(),
-        source: source.into(),
+        agent_nickname,
+        agent_role,
+        source: core_source.into(),
         can_accept_direct_input: None,
         thread_source: None,
         git_info,

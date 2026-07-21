@@ -1,20 +1,30 @@
-use crate::agent::role::apply_role_to_config;
+use crate::agent::role::ResolvedAgentRole;
+use crate::agent::role::apply_role_to_config_with_provenance;
+use crate::agent::role::intersect_role_runtime_permissions;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
+#[cfg(target_os = "linux")]
+use crate::exec::ExecCapturePolicy;
+#[cfg(target_os = "linux")]
+use crate::exec::ExecParams;
+#[cfg(target_os = "linux")]
+use crate::exec::process_exec_tool_call;
 use crate::function_tool::FunctionCallError;
 #[cfg(target_os = "linux")]
-use crate::landlock::spawn_command_under_linux_sandbox;
+use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
-#[cfg(target_os = "linux")]
-use crate::spawn::StdioPolicy;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+#[cfg(target_os = "linux")]
+use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+#[cfg(target_os = "linux")]
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseInputItem;
@@ -25,13 +35,10 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
-use codex_sandboxing::policy_transforms::intersect_runtime_permission_profiles;
 #[cfg(target_os = "linux")]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-#[cfg(target_os = "linux")]
-use std::collections::HashMap;
 
 /// Minimum wait timeout to prevent tight polling loops from burning CPU.
 pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
@@ -117,7 +124,7 @@ pub(crate) fn thread_spawn_source(
     parent_thread_id: ThreadId,
     parent_session_source: &SessionSource,
     depth: i32,
-    agent_role: Option<&str>,
+    resolved_role: &ResolvedAgentRole,
     task_name: Option<String>,
 ) -> Result<SessionSource, FunctionCallError> {
     let agent_path = task_name
@@ -135,7 +142,8 @@ pub(crate) fn thread_spawn_source(
         depth,
         agent_path,
         agent_nickname: None,
-        agent_role: agent_role.map(str::to_string),
+        agent_role: Some(resolved_role.name().to_string()),
+        agent_role_provenance: Some(resolved_role.provenance()),
     }))
 }
 
@@ -206,7 +214,7 @@ fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallE
         .or_else(|| turn.model_info.default_reasoning_level.clone());
     config.model_reasoning_summary = Some(turn.reasoning_summary);
     config.developer_instructions = turn.developer_instructions.clone();
-    apply_spawn_agent_runtime_overrides(&mut config, turn)?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn, /*resolved_role*/ None)?;
 
     Ok(config)
 }
@@ -229,6 +237,7 @@ pub(crate) fn reject_full_fork_agent_type_override(
 pub(crate) fn apply_spawn_agent_runtime_overrides(
     config: &mut Config,
     turn: &TurnContext,
+    resolved_role: Option<&ResolvedAgentRole>,
 ) -> Result<(), FunctionCallError> {
     config
         .permissions
@@ -246,7 +255,8 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     let parent_network_proxy = turn.config.permissions.network.clone();
     #[allow(deprecated)]
     let permission_cwd = turn.cwd.as_path();
-    let permission_profile = intersect_runtime_permission_profiles(
+    let permission_profile = intersect_role_runtime_permissions(
+        resolved_role,
         role_permission_profile,
         parent_permission_profile,
         permission_cwd,
@@ -255,7 +265,7 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     // specs contain domain and local-socket capabilities that are more granular than the coarse
     // runtime profile, and there is no lossless generic intersection for two independently
     // constrained specs. Keep the parent's spec as the hard runtime ceiling. Built-in read-only
-    // roles still disable network through `permission_profile` above.
+    // built-in analysis roles can request direct network through `permission_profile` above.
     config.permissions.network = parent_network_proxy;
     config
         .permissions
@@ -313,22 +323,37 @@ pub async fn probe_spawn_agent_sandbox(config: &Config) -> Result<(), String> {
             .ok_or_else(|| "the codex-linux-sandbox helper is unavailable".to_string())?;
         let cwd = AbsolutePathBuf::from_absolute_path(&config.cwd)
             .map_err(|err| format!("the child working directory is invalid: {err}"))?;
-        let mut child = spawn_command_under_linux_sandbox(
-            helper,
-            vec!["/bin/true".to_string()],
-            cwd.clone(),
+        let workspace_roots = config.effective_workspace_roots();
+        let linux_sandbox_exe = Some(helper.clone());
+        let output = process_exec_tool_call(
+            ExecParams {
+                command: vec!["/bin/true".to_string()],
+                cwd: cwd.clone(),
+                expiration: 5_000.into(),
+                capture_policy: ExecCapturePolicy::ShellTool,
+                env: Default::default(),
+                network: None,
+                network_environment_id: None,
+                sandbox_permissions: SandboxPermissions::UseDefault,
+                windows_sandbox_level: WindowsSandboxLevel::from_config(config),
+                windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+                justification: None,
+                arg0: None,
+            },
             &permission_profile,
             &cwd,
-            false,
-            StdioPolicy::RedirectForShellTool,
-            None,
-            HashMap::new(),
+            &workspace_roots,
+            &linux_sandbox_exe,
+            /*use_legacy_landlock*/ false,
+            /*stdout_stream*/ None,
         )
         .await
         .map_err(|err| err.to_string())?;
-        let status = child.wait().await.map_err(|err| err.to_string())?;
-        if !status.success() {
-            return Err(format!("sandbox probe exited with {status}"));
+        if output.exit_code != 0 {
+            return Err(format!(
+                "sandbox probe exited with code {}",
+                output.exit_code
+            ));
         }
         Ok(())
     }
@@ -489,19 +514,22 @@ pub(crate) async fn apply_spawn_agent_role(
     session: &Session,
     config: &mut Config,
     role_name: Option<&str>,
-) -> Result<(), FunctionCallError> {
+) -> Result<ResolvedAgentRole, FunctionCallError> {
+    let resolved_role_name = role_name.unwrap_or(crate::agent::role::DEFAULT_ROLE_NAME);
+    let resolved_role = ResolvedAgentRole::resolve(config, resolved_role_name)
+        .map_err(FunctionCallError::RespondToModel)?;
     let previous_model = config.model.clone();
     let previous_reasoning_effort = config.model_reasoning_effort.clone();
-    apply_role_to_config(config, role_name)
+    apply_role_to_config_with_provenance(config, resolved_role.name(), resolved_role.provenance())
         .await
         .map_err(FunctionCallError::RespondToModel)?;
     if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
     {
-        return Ok(());
+        return Ok(resolved_role);
     }
 
     let Some(reasoning_effort) = config.model_reasoning_effort.clone() else {
-        return Ok(());
+        return Ok(resolved_role);
     };
     let model = config.model.clone().ok_or_else(|| {
         FunctionCallError::RespondToModel(
@@ -515,14 +543,15 @@ pub(crate) async fn apply_spawn_agent_role(
         .get_model_info(&model, &config.to_models_manager_config())
         .await;
     if model_info.used_fallback_model_metadata {
-        return Ok(());
+        return Ok(resolved_role);
     }
 
     validate_spawn_agent_reasoning_effort(
         &model,
         &model_info.supported_reasoning_levels,
         &reasoning_effort,
-    )
+    )?;
+    Ok(resolved_role)
 }
 
 fn find_spawn_agent_model_name(

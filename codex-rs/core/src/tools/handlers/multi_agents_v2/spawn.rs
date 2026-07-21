@@ -130,7 +130,7 @@ async fn prepare_spawn_agent(
     )
     .await?;
     let model_before_role = config.model.clone();
-    apply_spawn_agent_role(session, &mut config, Some(role_name)).await?;
+    let resolved_role = apply_spawn_agent_role(session, &mut config, Some(role_name)).await?;
     if validate_effective_model_overrides || config.model != model_before_role {
         validate_effective_spawn_agent_model_overrides(session, turn.as_ref(), &config).await?;
     }
@@ -141,14 +141,14 @@ async fn prepare_spawn_agent(
         args.service_tier.as_deref(),
     )
     .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref(), Some(&resolved_role))?;
     super::super::multi_agents_common::preflight_spawn_agent_sandbox(&config).await?;
 
     let spawn_source = thread_spawn_source(
         session.thread_id,
         &turn.session_source,
         child_depth,
-        Some(role_name),
+        &resolved_role,
         Some(args.task_name.clone()),
     )?;
     let new_agent_path = spawn_source.get_agent_path().ok_or_else(|| {

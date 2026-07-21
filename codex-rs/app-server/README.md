@@ -403,6 +403,12 @@ Like `thread/resume`, experimental clients can pass `excludeTurns: true` to `thr
 - `searchTerm` — restrict results to threads whose extracted title contains this substring (case-sensitive).
 - Responses include `nextCursor` to continue in the same direction and `backwardsCursor` to pass as `cursor` when reversing `sortDirection`.
 - Responses include `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available.
+- In app-server v2, a spawned thread's `source` also records where its role definition came from.
+  The legacy v1 `ConversationSummary.source` shape is unchanged and does not expose provenance. For example, v2 may return
+  `{"subAgent":{"thread_spawn":{"parent_thread_id":"...","depth":1,"agent_role":"explorer","agent_role_provenance":"built_in"}}}`.
+  `agent_role_provenance` is additive and may be `"built_in"`, `"user_defined"`, or absent/null
+  for rollouts created before this field existed. Clients must tolerate the absent/null legacy form;
+  the server does not infer missing provenance from current configuration when reloading a role.
 
 Example:
 

@@ -2856,9 +2856,25 @@ pub enum SubAgentSource {
         agent_nickname: Option<String>,
         #[serde(default, alias = "agent_type")]
         agent_role: Option<String>,
+        #[serde(default)]
+        agent_role_provenance: Option<AgentRoleProvenance>,
     },
     MemoryConsolidation,
     Other(String),
+}
+
+/// Identifies which role registry supplied a spawned agent's persisted role definition.
+///
+/// Consumers must use this value when reloading a spawned thread instead of inferring provenance
+/// from the current configuration, because user-defined roles can shadow built-in role names.
+#[derive(Copy, Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum AgentRoleProvenance {
+    /// The role came from Codex's built-in role registry.
+    BuiltIn,
+    /// The role came from the user's configured role registry.
+    UserDefined,
 }
 
 impl fmt::Display for SessionSource {
@@ -2919,6 +2935,16 @@ impl SessionSource {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. }) => {
                 agent_role.clone()
             }
+            _ => None,
+        }
+    }
+
+    pub fn get_agent_role_provenance(&self) -> Option<AgentRoleProvenance> {
+        match self {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                agent_role_provenance,
+                ..
+            }) => *agent_role_provenance,
             _ => None,
         }
     }
@@ -4514,6 +4540,42 @@ mod tests {
             serde_json::from_value::<ThreadSource>(json!("automation"))?,
             source
         );
+        Ok(())
+    }
+
+    #[test]
+    fn thread_spawn_role_provenance_round_trips_and_defaults_when_missing() -> Result<()> {
+        let parent_thread_id = ThreadId::new();
+        let with_provenance = json!({
+            "subagent": {
+                "thread_spawn": {
+                    "parent_thread_id": parent_thread_id,
+                    "depth": 1,
+                    "agent_path": null,
+                    "agent_nickname": null,
+                    "agent_role": "explorer",
+                    "agent_role_provenance": "built_in"
+                }
+            }
+        });
+        let source: SessionSource = serde_json::from_value(with_provenance.clone())?;
+
+        assert_eq!(
+            source.get_agent_role_provenance(),
+            Some(AgentRoleProvenance::BuiltIn)
+        );
+        assert_eq!(serde_json::to_value(source)?, with_provenance);
+
+        let legacy_source: SessionSource = serde_json::from_value(json!({
+            "subagent": {
+                "thread_spawn": {
+                    "parent_thread_id": parent_thread_id,
+                    "depth": 1,
+                    "agent_role": "explorer"
+                }
+            }
+        }))?;
+        assert_eq!(legacy_source.get_agent_role_provenance(), None);
         Ok(())
     }
 

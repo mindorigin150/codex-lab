@@ -85,14 +85,7 @@ async fn handle_resume_agent(
         .get_status(receiver_thread_id)
         .await;
     let (receiver_agent, error) = if matches!(status, AgentStatus::NotFound) {
-        match Box::pin(try_resume_closed_agent(
-            &session,
-            &turn,
-            receiver_thread_id,
-            child_depth,
-        ))
-        .await
-        {
+        match Box::pin(try_resume_closed_agent(&session, &turn, receiver_thread_id)).await {
             Ok(()) => {
                 status = session
                     .services
@@ -189,19 +182,12 @@ async fn try_resume_closed_agent(
     session: &Arc<Session>,
     turn: &Arc<TurnContext>,
     receiver_thread_id: ThreadId,
-    child_depth: i32,
 ) -> Result<(), FunctionCallError> {
     let config = build_agent_resume_config(turn.as_ref())?;
     Box::pin(session.services.agent_control.resume_agent_from_rollout(
         config,
         receiver_thread_id,
-        thread_spawn_source(
-            session.thread_id(),
-            &turn.session_source,
-            child_depth,
-            /*agent_role*/ None,
-            /*task_name*/ None,
-        )?,
+        turn.session_source.clone(),
     ))
     .await
     .map(|_| ())

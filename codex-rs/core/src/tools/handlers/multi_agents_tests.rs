@@ -1,5 +1,6 @@
 use super::*;
 use crate::ThreadManager;
+use crate::agent::role::ResolvedAgentRole;
 use crate::agent::role::apply_role_to_config;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
@@ -41,6 +42,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AgentRoleProvenance;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -371,10 +373,15 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
         .approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy should be set");
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("full access profile should be set");
     turn.approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy should be set");
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+    turn.permission_profile = PermissionProfile::Disabled;
     turn.config = Arc::new(config);
 
     let invocation = invocation(
@@ -408,6 +415,62 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
         .await;
     assert_eq!(snapshot.approval_policy, AskForApproval::OnRequest);
     assert_eq!(snapshot.model_provider_id, "ollama");
+    assert_eq!(
+        snapshot.permission_profile.file_system_sandbox_policy(),
+        PermissionProfile::read_only().file_system_sandbox_policy()
+    );
+    assert_eq!(
+        snapshot.permission_profile.network_sandbox_policy(),
+        NetworkSandboxPolicy::Enabled
+    );
+    assert_eq!(
+        snapshot.session_source.get_agent_role_provenance(),
+        Some(codex_protocol::protocol::AgentRoleProvenance::BuiltIn)
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_omitted_role_persists_custom_default_provenance() {
+    #[derive(Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config
+        .agent_roles
+        .insert("default".to_string(), AgentRoleConfig::default());
+    turn.config = Arc::new(config);
+
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({"message": "inspect this repo"})),
+        ))
+        .await
+        .expect("spawn_agent should resolve the omitted default role");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult = serde_json::from_str(&content).expect("spawn result json");
+    let snapshot = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("spawned thread")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(
+        snapshot.session_source.get_agent_role().as_deref(),
+        Some("default")
+    );
+    assert_eq!(
+        snapshot.session_source.get_agent_role_provenance(),
+        Some(AgentRoleProvenance::UserDefined)
+    );
 }
 
 #[tokio::test]
@@ -441,6 +504,62 @@ async fn spawn_agent_fork_context_rejects_agent_type_override() {
         FunctionCallError::RespondToModel(
             "Full-history forked agents inherit the parent agent type; omit agent_type, or spawn without a full-history fork.".to_string(),
         )
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_full_history_inherits_builtin_explorer_provenance() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    apply_role_to_config(&mut config, Some("explorer"))
+        .await
+        .expect("built-in explorer role");
+    let root = manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    turn.config = Arc::new(config);
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: Some(AgentPath::try_from("/root/explorer").expect("agent path")),
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+        agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
+    });
+
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "fork_context": true
+            })),
+        ))
+        .await
+        .expect("full-history fork should inherit the parent role");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value = serde_json::from_str(&content).expect("spawn result json");
+    let child_id = parse_agent_id(result["agent_id"].as_str().expect("agent id"));
+    let snapshot = manager
+        .get_thread(child_id)
+        .await
+        .expect("spawned child")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(
+        snapshot.session_source.get_agent_role().as_deref(),
+        Some("explorer")
+    );
+    assert_eq!(
+        snapshot.session_source.get_agent_role_provenance(),
+        Some(AgentRoleProvenance::BuiltIn)
     );
 }
 
@@ -577,6 +696,10 @@ async fn multi_agent_v2_explorer_defaults_to_fresh_context() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("full access profile should be set");
     let root = manager
         .start_thread(config.clone())
         .await
@@ -584,6 +707,7 @@ async fn multi_agent_v2_explorer_defaults_to_fresh_context() {
     session.services.agent_control = manager.agent_control();
     session.thread_id = root.thread_id;
     set_turn_config(&mut turn, config);
+    turn.permission_profile = PermissionProfile::Disabled;
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
@@ -621,6 +745,18 @@ async fn multi_agent_v2_explorer_defaults_to_fresh_context() {
         .await;
 
     assert_eq!(snapshot.forked_from_thread_id, None);
+    assert_eq!(
+        snapshot.permission_profile.file_system_sandbox_policy(),
+        PermissionProfile::read_only().file_system_sandbox_policy()
+    );
+    assert_eq!(
+        snapshot.permission_profile.network_sandbox_policy(),
+        NetworkSandboxPolicy::Enabled
+    );
+    assert_eq!(
+        snapshot.session_source.get_agent_role_provenance(),
+        Some(codex_protocol::protocol::AgentRoleProvenance::BuiltIn)
+    );
 }
 
 #[tokio::test]
@@ -1117,6 +1253,14 @@ service_tier = "turbo"
         snapshot.service_tier,
         Some(ServiceTier::Fast.request_value().to_string())
     );
+    assert_eq!(
+        snapshot.session_source.get_agent_role().as_deref(),
+        Some("default")
+    );
+    assert_eq!(
+        snapshot.session_source.get_agent_role_provenance(),
+        Some(AgentRoleProvenance::BuiltIn)
+    );
 }
 
 #[tokio::test]
@@ -1170,16 +1314,26 @@ service_tier = "priority"
 }
 
 #[tokio::test]
-async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
+async fn root_full_history_fork_uses_builtin_default_across_resume() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
     }
 
     let (mut session, turn) = make_session_and_context().await;
-    let turn = turn
+    let mut turn = turn
         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
         .await;
+    let custom_role_name = install_valid_v2_role_with_model_override(&mut turn).await;
+    let mut config = (*turn.config).clone();
+    let custom_default = config
+        .agent_roles
+        .remove(&custom_role_name)
+        .expect("custom role should be installed");
+    config
+        .agent_roles
+        .insert("default".to_string(), custom_default);
+    turn.config = Arc::new(config.clone());
     let manager = thread_manager();
     let root = manager
         .start_thread((*turn.config).clone())
@@ -1188,9 +1342,10 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
     session.services.agent_control = manager.agent_control();
     session.thread_id = root.thread_id;
 
+    let session = Arc::new(session);
     let output = SpawnAgentHandler::default()
         .handle(invocation(
-            Arc::new(session),
+            session.clone(),
             Arc::new(turn),
             "spawn_agent",
             function_payload(json!({
@@ -1200,20 +1355,63 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
             })),
         ))
         .await
-        .expect("full-history fork should accept explicit service tier");
+        .expect("root full-history fork should use the built-in default role");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
-    let snapshot = manager
-        .get_thread(parse_agent_id(&result.agent_id))
+    let child_id = parse_agent_id(&result.agent_id);
+    let child = manager
+        .get_thread(child_id)
         .await
-        .expect("spawned agent thread should exist")
-        .config_snapshot()
-        .await;
+        .expect("spawned agent thread should exist");
+    let snapshot = child.config_snapshot().await;
 
     assert_eq!(
         snapshot.service_tier,
         Some(ServiceTier::Fast.request_value().to_string())
+    );
+    assert_eq!(snapshot.model, "gpt-5.4");
+    assert_eq!(
+        snapshot.session_source.get_agent_role().as_deref(),
+        Some("default")
+    );
+    assert_eq!(
+        snapshot.session_source.get_agent_role_provenance(),
+        Some(AgentRoleProvenance::BuiltIn)
+    );
+
+    child.ensure_rollout_materialized().await;
+    child
+        .flush_rollout()
+        .await
+        .expect("child rollout should flush");
+    session
+        .services
+        .agent_control
+        .shutdown_live_agent(child_id)
+        .await
+        .expect("child should shut down before resume");
+    session
+        .services
+        .agent_control
+        .resume_agent_from_rollout(config, child_id, SessionSource::Exec)
+        .await
+        .expect("child should resume with its persisted built-in provenance");
+    let resumed_snapshot = manager
+        .get_thread(child_id)
+        .await
+        .expect("resumed child should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(resumed_snapshot.model, "gpt-5.4");
+    assert_eq!(
+        resumed_snapshot.session_source.get_agent_role().as_deref(),
+        Some("default")
+    );
+    assert_eq!(
+        resumed_snapshot.session_source.get_agent_role_provenance(),
+        Some(AgentRoleProvenance::BuiltIn)
     );
 }
 
@@ -1744,6 +1942,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                 agent_path: Some(child_path.clone()),
                 agent_nickname: None,
                 agent_role: None,
+                agent_role_provenance: None,
             })),
             crate::agent::control::SpawnAgentOptions::default(),
         )
@@ -1757,6 +1956,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         agent_path: Some(child_path.clone()),
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     SendMessageHandlerV2
@@ -1820,6 +2020,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
                 agent_path: Some(child_path.clone()),
                 agent_nickname: None,
                 agent_role: None,
+                agent_role_provenance: None,
             })),
             crate::agent::control::SpawnAgentOptions::default(),
         )
@@ -1833,6 +2034,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
         agent_path: Some(child_path),
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     let Err(err) = FollowupTaskHandlerV2
@@ -1993,6 +2195,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
                 agent_path: Some(researcher_path.clone()),
                 agent_nickname: None,
                 agent_role: None,
+                agent_role_provenance: None,
             })),
             crate::agent::control::SpawnAgentOptions::default(),
         )
@@ -2013,6 +2216,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
                 agent_path: Some(worker_path.clone()),
                 agent_nickname: None,
                 agent_role: None,
+                agent_role_provenance: None,
             })),
             crate::agent::control::SpawnAgentOptions::default(),
         )
@@ -2025,6 +2229,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
         agent_path: Some(researcher_path),
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     let output = ListAgentsHandlerV2
@@ -2802,6 +3007,7 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
         agent_path: None,
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     let invocation = invocation(
@@ -2842,6 +3048,7 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
         agent_path: None,
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     let invocation = invocation(
@@ -2891,6 +3098,7 @@ async fn multi_agent_v2_spawn_agent_rejects_when_depth_limit_exceeded() {
         agent_path: Some(parent_path),
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     let invocation = invocation(
@@ -3268,6 +3476,7 @@ async fn resume_agent_rejects_when_depth_limit_exceeded() {
         agent_path: None,
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     let invocation = invocation(
@@ -4007,6 +4216,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_id() {
                 agent_path: Some(child_path.clone()),
                 agent_nickname: None,
                 agent_role: None,
+                agent_role_provenance: None,
             })),
             crate::agent::control::SpawnAgentOptions::default(),
         )
@@ -4020,6 +4230,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_id() {
         agent_path: Some(child_path),
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     let err = InterruptAgentHandler
@@ -4074,6 +4285,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_task_name() {
                 agent_path: Some(child_path.clone()),
                 agent_nickname: None,
                 agent_role: None,
+                agent_role_provenance: None,
             })),
             crate::agent::control::SpawnAgentOptions::default(),
         )
@@ -4087,6 +4299,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_task_name() {
         agent_path: Some(child_path.clone()),
         agent_nickname: None,
         agent_role: None,
+        agent_role_provenance: None,
     });
 
     let err = InterruptAgentHandler
@@ -4433,7 +4646,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
         .or_else(|| turn.model_info.default_reasoning_level.clone());
     expected.model_reasoning_summary = Some(turn.reasoning_summary);
     expected.developer_instructions = turn.developer_instructions.clone();
-    apply_spawn_agent_runtime_overrides(&mut expected, &turn)
+    apply_spawn_agent_runtime_overrides(&mut expected, &turn, /*resolved_role*/ None)
         .expect("runtime overrides should apply to expected config");
     assert_eq!(config, expected);
 }
@@ -4459,12 +4672,19 @@ async fn spawn_runtime_permissions_apply_role_and_parent_intersection() {
     apply_role_to_config(&mut explorer_config, Some("explorer"))
         .await
         .expect("explorer role should apply");
-    apply_spawn_agent_runtime_overrides(&mut explorer_config, &turn)
+    let resolved_explorer =
+        ResolvedAgentRole::resolve(&explorer_config, "explorer").expect("built-in explorer role");
+    apply_spawn_agent_runtime_overrides(&mut explorer_config, &turn, Some(&resolved_explorer))
         .expect("parent runtime permissions should apply");
 
+    let effective_profile = explorer_config.permissions.effective_permission_profile();
     assert_eq!(
-        explorer_config.permissions.effective_permission_profile(),
-        PermissionProfile::read_only()
+        effective_profile.file_system_sandbox_policy(),
+        PermissionProfile::read_only().file_system_sandbox_policy()
+    );
+    assert_eq!(
+        effective_profile.network_sandbox_policy(),
+        NetworkSandboxPolicy::Enabled
     );
 
     let mut restricted_turn = turn;
@@ -4473,8 +4693,12 @@ async fn spawn_runtime_permissions_apply_role_and_parent_intersection() {
         .permissions
         .set_permission_profile(PermissionProfile::Disabled)
         .expect("test role should request unrestricted permissions");
-    apply_spawn_agent_runtime_overrides(&mut explorer_config, &restricted_turn)
-        .expect("parent runtime permissions should prevent role expansion");
+    apply_spawn_agent_runtime_overrides(
+        &mut explorer_config,
+        &restricted_turn,
+        Some(&resolved_explorer),
+    )
+    .expect("parent runtime permissions should prevent role expansion");
 
     assert_eq!(
         explorer_config.permissions.effective_permission_profile(),
@@ -4554,7 +4778,7 @@ async fn spawn_runtime_overrides_preserve_parent_network_proxy_ceiling() {
         .expect("role proxy spec"),
     );
 
-    apply_spawn_agent_runtime_overrides(&mut child_config, &turn)
+    apply_spawn_agent_runtime_overrides(&mut child_config, &turn, /*resolved_role*/ None)
         .expect("parent runtime network proxy should apply");
 
     assert_eq!(child_config.permissions.network, Some(parent_proxy));
@@ -4586,7 +4810,7 @@ async fn spawn_runtime_overrides_do_not_create_proxy_absent_from_parent() {
         .expect("role proxy spec"),
     );
 
-    apply_spawn_agent_runtime_overrides(&mut child_config, &turn)
+    apply_spawn_agent_runtime_overrides(&mut child_config, &turn, /*resolved_role*/ None)
         .expect("parent runtime network policy should apply");
 
     assert_eq!(child_config.permissions.network, None);

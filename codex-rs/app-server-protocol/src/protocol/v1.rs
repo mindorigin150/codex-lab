@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ReasoningSummary;
@@ -11,9 +12,11 @@ use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 pub use codex_protocol::protocol::GitSha;
+use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
-use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SessionSource as CoreSessionSource;
+use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use schemars::JsonSchema;
@@ -23,6 +26,122 @@ use ts_rs::TS;
 
 use crate::protocol::common::AuthMode;
 use crate::protocol::v2::ForcedChatgptWorkspaceIds;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS, Default)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase")]
+pub enum SessionSource {
+    Cli,
+    #[default]
+    VSCode,
+    Exec,
+    Mcp,
+    Custom(String),
+    Internal(InternalSessionSource),
+    SubAgent(ConversationSubAgentSource),
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ConversationSubAgentSource {
+    Review,
+    Compact,
+    ThreadSpawn {
+        parent_thread_id: ThreadId,
+        depth: i32,
+        #[serde(default)]
+        agent_path: Option<AgentPath>,
+        #[serde(default)]
+        agent_nickname: Option<String>,
+        #[serde(default, alias = "agent_type")]
+        agent_role: Option<String>,
+    },
+    MemoryConsolidation,
+    Other(String),
+}
+
+impl From<CoreSessionSource> for SessionSource {
+    fn from(source: CoreSessionSource) -> Self {
+        match source {
+            CoreSessionSource::Cli => Self::Cli,
+            CoreSessionSource::VSCode => Self::VSCode,
+            CoreSessionSource::Exec => Self::Exec,
+            CoreSessionSource::Mcp => Self::Mcp,
+            CoreSessionSource::Custom(source) => Self::Custom(source),
+            CoreSessionSource::Internal(source) => Self::Internal(source),
+            CoreSessionSource::SubAgent(source) => Self::SubAgent(source.into()),
+            CoreSessionSource::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<CoreSubAgentSource> for ConversationSubAgentSource {
+    fn from(source: CoreSubAgentSource) -> Self {
+        match source {
+            CoreSubAgentSource::Review => Self::Review,
+            CoreSubAgentSource::Compact => Self::Compact,
+            CoreSubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth,
+                agent_path,
+                agent_nickname,
+                agent_role,
+                agent_role_provenance: _,
+            } => Self::ThreadSpawn {
+                parent_thread_id,
+                depth,
+                agent_path,
+                agent_nickname,
+                agent_role,
+            },
+            CoreSubAgentSource::MemoryConsolidation => Self::MemoryConsolidation,
+            CoreSubAgentSource::Other(source) => Self::Other(source),
+        }
+    }
+}
+
+impl From<SessionSource> for CoreSessionSource {
+    fn from(source: SessionSource) -> Self {
+        match source {
+            SessionSource::Cli => Self::Cli,
+            SessionSource::VSCode => Self::VSCode,
+            SessionSource::Exec => Self::Exec,
+            SessionSource::Mcp => Self::Mcp,
+            SessionSource::Custom(source) => Self::Custom(source),
+            SessionSource::Internal(source) => Self::Internal(source),
+            SessionSource::SubAgent(source) => Self::SubAgent(source.into()),
+            SessionSource::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<ConversationSubAgentSource> for CoreSubAgentSource {
+    fn from(source: ConversationSubAgentSource) -> Self {
+        match source {
+            ConversationSubAgentSource::Review => Self::Review,
+            ConversationSubAgentSource::Compact => Self::Compact,
+            ConversationSubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth,
+                agent_path,
+                agent_nickname,
+                agent_role,
+            } => Self::ThreadSpawn {
+                parent_thread_id,
+                depth,
+                agent_path,
+                agent_nickname,
+                agent_role,
+                agent_role_provenance: None,
+            },
+            ConversationSubAgentSource::MemoryConsolidation => Self::MemoryConsolidation,
+            ConversationSubAgentSource::Other(source) => Self::Other(source),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -235,3 +354,7 @@ pub struct SandboxSettings {
 pub struct InterruptConversationResponse {
     pub abort_reason: TurnAbortReason,
 }
+
+#[cfg(test)]
+#[path = "v1_tests.rs"]
+mod tests;

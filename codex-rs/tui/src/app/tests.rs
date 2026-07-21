@@ -102,6 +102,7 @@ use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AgentRoleProvenance;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -1923,6 +1924,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                     agent_path: None,
                     agent_nickname: Some(format!("child-{index}")),
                     agent_role: Some("worker".to_string()),
+                    agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
                 }),
                 model_provider: Some(app.config.model_provider_id.clone()),
                 multi_agent_version: Some(multi_agent_version),

@@ -19,6 +19,7 @@ use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::AgentRoleProvenance;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ResumedHistory;
@@ -47,6 +48,7 @@ fn v2_child_cannot_be_resumed_as_a_primary_thread() {
         agent_path: Some(AgentPath::root().join("child").expect("child path")),
         agent_nickname: None,
         agent_role: Some("explorer".to_string()),
+        agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
     });
     let error = validate_primary_resume_source(MultiAgentVersion::V2, &source)
         .expect_err("v2 child primary resume should be rejected");

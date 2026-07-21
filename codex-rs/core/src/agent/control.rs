@@ -632,6 +632,7 @@ impl AgentControl {
         depth: i32,
         agent_path: Option<AgentPath>,
         agent_role: Option<String>,
+        agent_role_provenance: Option<codex_protocol::protocol::AgentRoleProvenance>,
         preferred_agent_nickname: Option<String>,
     ) -> CodexResult<(SessionSource, AgentMetadata)> {
         if depth == 1 {
@@ -650,6 +651,7 @@ impl AgentControl {
             agent_path: agent_metadata.agent_path.clone(),
             agent_nickname: agent_metadata.agent_nickname.clone(),
             agent_role: agent_metadata.agent_role.clone(),
+            agent_role_provenance,
         });
         Ok((session_source, agent_metadata))
     }

@@ -5,7 +5,9 @@ use crate::skills_load_input_from_config;
 use codex_config::ConfigLayerStackOrdering;
 use codex_core_plugins::PluginsManager;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
@@ -47,6 +49,113 @@ fn session_flags_layer_count(config: &Config) -> usize {
         .into_iter()
         .filter(|layer| layer.name == ConfigLayerSource::SessionFlags)
         .count()
+}
+
+#[tokio::test]
+async fn built_in_analysis_roles_enable_network_under_full_access_parent() {
+    let (_home, config) = test_config_with_cli_overrides(Vec::new()).await;
+
+    for role_name in [EXPLORER_ROLE_NAME, REVIEWER_ROLE_NAME] {
+        let resolved_role = ResolvedAgentRole::resolve(&config, role_name).expect("built-in role");
+        let profile = intersect_role_runtime_permissions(
+            Some(&resolved_role),
+            PermissionProfile::read_only(),
+            PermissionProfile::Disabled,
+            config.cwd.as_path(),
+        );
+
+        assert_eq!(
+            profile.file_system_sandbox_policy(),
+            PermissionProfile::read_only().file_system_sandbox_policy()
+        );
+        assert_eq!(
+            profile.network_sandbox_policy(),
+            NetworkSandboxPolicy::Enabled
+        );
+    }
+}
+
+#[tokio::test]
+async fn role_network_exception_does_not_apply_to_custom_role_or_restricted_parent() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config
+        .agent_roles
+        .insert(EXPLORER_ROLE_NAME.to_string(), AgentRoleConfig::default());
+    let custom_explorer_role =
+        ResolvedAgentRole::resolve(&config, EXPLORER_ROLE_NAME).expect("custom explorer role");
+
+    let custom_explorer = intersect_role_runtime_permissions(
+        Some(&custom_explorer_role),
+        PermissionProfile::read_only(),
+        PermissionProfile::Disabled,
+        config.cwd.as_path(),
+    );
+    assert_eq!(custom_explorer, PermissionProfile::read_only());
+
+    let built_in_reviewer_role =
+        ResolvedAgentRole::resolve(&config, REVIEWER_ROLE_NAME).expect("built-in reviewer role");
+    let built_in_reviewer_with_restricted_parent = intersect_role_runtime_permissions(
+        Some(&built_in_reviewer_role),
+        PermissionProfile::read_only(),
+        PermissionProfile::read_only(),
+        config.cwd.as_path(),
+    );
+    assert_eq!(
+        built_in_reviewer_with_restricted_parent,
+        PermissionProfile::read_only()
+    );
+
+    let managed_enabled_parent = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Enabled,
+        /*exclude_tmpdir_env_var*/ false,
+        /*exclude_slash_tmp*/ false,
+    );
+    let built_in_reviewer_with_managed_enabled_parent = intersect_role_runtime_permissions(
+        Some(&built_in_reviewer_role),
+        PermissionProfile::read_only(),
+        managed_enabled_parent,
+        config.cwd.as_path(),
+    );
+    assert_eq!(
+        built_in_reviewer_with_managed_enabled_parent.network_sandbox_policy(),
+        NetworkSandboxPolicy::Enabled
+    );
+    assert!(
+        !built_in_reviewer_with_managed_enabled_parent
+            .file_system_sandbox_policy()
+            .can_write_path_with_cwd(config.cwd.as_path(), config.cwd.as_path())
+    );
+
+    let built_in_reviewer_with_external_enabled_parent = intersect_role_runtime_permissions(
+        Some(&built_in_reviewer_role),
+        PermissionProfile::read_only(),
+        PermissionProfile::External {
+            network: NetworkSandboxPolicy::Enabled,
+        },
+        config.cwd.as_path(),
+    );
+    assert_eq!(
+        built_in_reviewer_with_external_enabled_parent.network_sandbox_policy(),
+        NetworkSandboxPolicy::Enabled
+    );
+
+    let legacy_explorer = intersect_role_runtime_permissions(
+        /*resolved_role*/ None,
+        PermissionProfile::read_only(),
+        PermissionProfile::Disabled,
+        config.cwd.as_path(),
+    );
+    assert_eq!(legacy_explorer, PermissionProfile::read_only());
+
+    let worker_role = ResolvedAgentRole::resolve(&config, WORKER_ROLE_NAME).expect("worker role");
+    let worker = intersect_role_runtime_permissions(
+        Some(&worker_role),
+        PermissionProfile::read_only(),
+        PermissionProfile::Disabled,
+        config.cwd.as_path(),
+    );
+    assert_eq!(worker, PermissionProfile::read_only());
 }
 
 #[tokio::test]

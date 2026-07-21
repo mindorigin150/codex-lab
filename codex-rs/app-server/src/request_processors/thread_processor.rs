@@ -5061,7 +5061,7 @@ fn summary_from_stored_thread(
         },
         cwd: thread.cwd,
         cli_version: thread.cli_version,
-        source,
+        source: source.into(),
         git_info,
     }
 }
@@ -5109,7 +5109,7 @@ fn summary_from_state_db_metadata(
         model_provider,
         cwd,
         cli_version,
-        source,
+        source: source.into(),
         git_info,
     }
 }

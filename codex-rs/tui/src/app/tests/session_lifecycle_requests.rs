@@ -181,6 +181,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                             ),
                             agent_nickname: Some("worker".to_string()),
                             agent_role: Some("worker".to_string()),
+                            agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
                         }),
                         root_thread_id.into(),
                         root_thread_id,

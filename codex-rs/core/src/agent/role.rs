@@ -19,6 +19,12 @@ use codex_config::ConfigLayerStackOrdering;
 use codex_config::config_toml::ConfigToml;
 use codex_config::loader::resolve_relative_paths_in_config_toml;
 use codex_exec_server::LOCAL_FS;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::AgentRoleProvenance;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_sandboxing::policy_transforms::intersect_runtime_permission_profiles;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -32,36 +38,164 @@ pub(crate) const EXPLORER_ROLE_NAME: &str = "explorer";
 pub(crate) const REVIEWER_ROLE_NAME: &str = "reviewer";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedAgentRole {
+    name: String,
+    provenance: AgentRoleProvenance,
+}
+
+impl ResolvedAgentRole {
+    pub(crate) fn built_in_default() -> Self {
+        Self {
+            name: DEFAULT_ROLE_NAME.to_string(),
+            provenance: AgentRoleProvenance::BuiltIn,
+        }
+    }
+
+    pub(crate) fn resolve(config: &Config, role_name: &str) -> Result<Self, String> {
+        let provenance = resolve_role_provenance(config, role_name)
+            .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
+        Ok(Self {
+            name: role_name.to_string(),
+            provenance,
+        })
+    }
+
+    pub(crate) fn from_session_source(
+        session_source: &SessionSource,
+    ) -> Result<Option<Self>, String> {
+        match session_source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                agent_role: Some(name),
+                agent_role_provenance: Some(provenance),
+                ..
+            }) => Ok(Some(Self {
+                name: name.clone(),
+                provenance: *provenance,
+            })),
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                agent_role: Some(name),
+                agent_role_provenance: None,
+                ..
+            }) => Err(format!(
+                "cannot safely restore agent role '{name}': persisted role provenance is missing"
+            )),
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                agent_role: None,
+                agent_role_provenance: Some(_),
+                ..
+            }) => Err(
+                "cannot safely restore agent role: persisted provenance has no role name"
+                    .to_string(),
+            ),
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                agent_role: None,
+                agent_role_provenance: None,
+                ..
+            }) => Err(
+                "cannot safely restore thread-spawn agent: persisted role and provenance are missing"
+                    .to_string(),
+            ),
+            SessionSource::SubAgent(_) | SessionSource::Internal(_) => Err(
+                "cannot resolve a thread-spawn role from a non-root internal session source"
+                    .to_string(),
+            ),
+            SessionSource::Cli
+            | SessionSource::VSCode
+            | SessionSource::Exec
+            | SessionSource::Mcp
+            | SessionSource::Custom(_)
+            | SessionSource::Unknown => Ok(None),
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn provenance(&self) -> AgentRoleProvenance {
+        self.provenance
+    }
+}
+
+/// Intersects a role's requested runtime permissions with the parent runtime ceiling.
+///
+/// Built-in read-only analysis roles retain their filesystem restrictions under a fully
+/// unrestricted parent, but may use the network directly. User-defined roles with the same names
+/// continue to use the ordinary intersection semantics.
+pub(crate) fn intersect_role_runtime_permissions(
+    resolved_role: Option<&ResolvedAgentRole>,
+    mut role_permission_profile: PermissionProfile,
+    parent_permission_profile: PermissionProfile,
+    cwd: &Path,
+) -> PermissionProfile {
+    let enable_builtin_analysis_network = resolved_role.is_some_and(|role| {
+        role.provenance == AgentRoleProvenance::BuiltIn
+            && matches!(role.name.as_str(), EXPLORER_ROLE_NAME | REVIEWER_ROLE_NAME)
+    });
+    if enable_builtin_analysis_network {
+        match &mut role_permission_profile {
+            PermissionProfile::Managed { network, .. }
+            | PermissionProfile::External { network } => {
+                *network = NetworkSandboxPolicy::Enabled;
+            }
+            PermissionProfile::Disabled => {}
+        }
+    }
+    intersect_runtime_permission_profiles(role_permission_profile, parent_permission_profile, cwd)
+}
+
 /// Applies a named role layer to `config` while preserving caller-owned provider settings.
 ///
 /// The role layer is inserted at session-flag precedence so it can override persisted config, but
 /// the caller's current `model_provider` and `service_tier` remain sticky runtime choices unless
 /// the role explicitly sets the corresponding top-level config key. Rebuilding the config without
 /// those overrides would make a spawned agent silently fall back to default settings.
+#[cfg(test)]
 pub(crate) async fn apply_role_to_config(
     config: &mut Config,
     role_name: Option<&str>,
 ) -> Result<(), String> {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
-
-    let role = resolve_role_config(config, role_name)
-        .cloned()
+    let provenance = resolve_role_provenance(config, role_name)
         .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
+    apply_role_to_config_with_provenance(config, role_name, provenance).await
+}
 
-    apply_role_to_config_inner(config, role_name, &role)
-        .await
-        .map_err(|err| {
-            tracing::warn!("failed to apply role to config: {err}");
-            AGENT_TYPE_UNAVAILABLE_ERROR.to_string()
-        })
+pub(crate) async fn apply_role_to_config_with_provenance(
+    config: &mut Config,
+    role_name: &str,
+    provenance: AgentRoleProvenance,
+) -> Result<(), String> {
+    let role = resolve_role_config_with_provenance(config, role_name, provenance)
+        .cloned()
+        .ok_or_else(|| {
+            let source = match provenance {
+                AgentRoleProvenance::BuiltIn => "built-in",
+                AgentRoleProvenance::UserDefined => "user-defined",
+            };
+            format!("agent_type '{role_name}' is unavailable from its persisted {source} source")
+        })?;
+
+    apply_role_to_config_inner(
+        config,
+        role_name,
+        &role,
+        provenance == AgentRoleProvenance::BuiltIn,
+    )
+    .await
+    .map_err(|err| {
+        tracing::warn!("failed to apply role to config: {err}");
+        AGENT_TYPE_UNAVAILABLE_ERROR.to_string()
+    })
 }
 
 async fn apply_role_to_config_inner(
     config: &mut Config,
     role_name: &str,
     role: &AgentRoleConfig,
+    is_built_in: bool,
 ) -> anyhow::Result<()> {
-    let is_built_in = !config.agent_roles.contains_key(role_name);
     let Some(config_file) = role.config_file.as_ref() else {
         return Ok(());
     };
@@ -151,6 +285,30 @@ pub(crate) fn resolve_role_config<'a>(
         .agent_roles
         .get(role_name)
         .or_else(|| built_in::configs().get(role_name))
+}
+
+pub(crate) fn resolve_role_provenance(
+    config: &Config,
+    role_name: &str,
+) -> Option<AgentRoleProvenance> {
+    if config.agent_roles.contains_key(role_name) {
+        Some(AgentRoleProvenance::UserDefined)
+    } else if built_in::configs().contains_key(role_name) {
+        Some(AgentRoleProvenance::BuiltIn)
+    } else {
+        None
+    }
+}
+
+fn resolve_role_config_with_provenance<'a>(
+    config: &'a Config,
+    role_name: &str,
+    provenance: AgentRoleProvenance,
+) -> Option<&'a AgentRoleConfig> {
+    match provenance {
+        AgentRoleProvenance::BuiltIn => built_in::configs().get(role_name),
+        AgentRoleProvenance::UserDefined => config.agent_roles.get(role_name),
+    }
 }
 
 mod reload {

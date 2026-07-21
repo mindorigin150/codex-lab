@@ -15,6 +15,9 @@ use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::openai_models::WebSearchToolType;
+use codex_protocol::protocol::AgentRoleProvenance;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_tools::DiscoverablePluginInfo;
 use codex_tools::DiscoverableTool;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -1486,6 +1489,7 @@ async fn multi_agent_v2_hides_collaboration_tools_at_configured_max_depth() {
             agent_path: None,
             agent_nickname: None,
             agent_role: Some("explorer".to_string()),
+            agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
         });
     })
     .await;

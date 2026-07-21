@@ -56,7 +56,7 @@ fn expected_summary(conversation_id: ThreadId, path: PathBuf) -> ConversationSum
         model_provider: MODEL_PROVIDER.to_string(),
         cwd: test_path_buf("/"),
         cli_version: "0.0.0".to_string(),
-        source: SessionSource::Cli,
+        source: SessionSource::Cli.into(),
         git_info: None,
     }
 }

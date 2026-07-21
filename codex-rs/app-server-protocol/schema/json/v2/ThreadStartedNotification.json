@@ -8,6 +8,25 @@
     "AgentPath": {
       "type": "string"
     },
+    "AgentRoleProvenance": {
+      "description": "Identifies which role registry supplied a spawned agent's persisted role definition.\n\nConsumers must use this value when reloading a spawned thread instead of inferring provenance from the current configuration, because user-defined roles can shadow built-in role names.",
+      "oneOf": [
+        {
+          "description": "The role came from Codex's built-in role registry.",
+          "enum": [
+            "built_in"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The role came from the user's configured role registry.",
+          "enum": [
+            "user_defined"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -834,6 +853,17 @@
                     "string",
                     "null"
                   ]
+                },
+                "agent_role_provenance": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/AgentRoleProvenance"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
                 },
                 "depth": {
                   "format": "int32",

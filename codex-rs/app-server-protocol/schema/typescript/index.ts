@@ -3,6 +3,7 @@
 export type { AbsolutePathBuf } from "./AbsolutePathBuf";
 export type { AgentMessageInputContent } from "./AgentMessageInputContent";
 export type { AgentPath } from "./AgentPath";
+export type { AgentRoleProvenance } from "./AgentRoleProvenance";
 export type { ApplyPatchApprovalParams } from "./ApplyPatchApprovalParams";
 export type { ApplyPatchApprovalResponse } from "./ApplyPatchApprovalResponse";
 export type { AuthMode } from "./AuthMode";
@@ -14,6 +15,7 @@ export type { CodexResponseHandoffMode } from "./CodexResponseHandoffMode";
 export type { CollaborationMode } from "./CollaborationMode";
 export type { ContentItem } from "./ContentItem";
 export type { ConversationGitInfo } from "./ConversationGitInfo";
+export type { ConversationSubAgentSource } from "./ConversationSubAgentSource";
 export type { ConversationSummary } from "./ConversationSummary";
 export type { ConversationTextRole } from "./ConversationTextRole";
 export type { ExecCommandApprovalParams } from "./ExecCommandApprovalParams";

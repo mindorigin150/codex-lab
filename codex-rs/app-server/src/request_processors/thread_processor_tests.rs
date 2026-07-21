@@ -1042,7 +1042,7 @@ mod thread_processor_behavior_tests {
             model_provider: "fallback".to_string(),
             cwd: PathBuf::new(),
             cli_version: String::new(),
-            source: SessionSource::VSCode,
+            source: SessionSource::VSCode.into(),
             git_info: None,
         };
 
@@ -1074,6 +1074,7 @@ mod thread_processor_behavior_tests {
                 agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
+                agent_role_provenance: None,
             }),
             thread_source: Some(codex_protocol::protocol::ThreadSource::Subagent),
             agent_nickname: Some("atlas".to_string()),
@@ -1216,6 +1217,7 @@ mod thread_processor_behavior_tests {
                 agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
+                agent_role_provenance: None,
             }))?;
 
         let summary = summary_from_state_db_metadata(

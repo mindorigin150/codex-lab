@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::AgentRoleProvenance;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SandboxPolicy;
@@ -79,6 +80,7 @@ fn spawned_thread_start_appends_to_root_bundle() -> anyhow::Result<()> {
             ),
             agent_nickname: Some("Kepler".to_string()),
             agent_role: Some("worker".to_string()),
+            agent_role_provenance: Some(AgentRoleProvenance::BuiltIn),
         }),
         cwd: PathBuf::from("/workspace"),
         rollout_path: Some(PathBuf::from("/tmp/child-rollout.jsonl")),

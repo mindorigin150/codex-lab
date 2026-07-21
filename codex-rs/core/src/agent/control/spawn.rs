@@ -1,26 +1,31 @@
 use super::residency::is_v2_resident_session_source;
 use super::*;
-use crate::agent::role::apply_role_to_config;
+use crate::agent::role::ResolvedAgentRole;
+use crate::agent::role::apply_role_to_config_with_provenance;
+use crate::agent::role::intersect_role_runtime_permissions;
 use codex_extension_api::ExtensionDataInit;
-use codex_sandboxing::policy_transforms::intersect_runtime_permission_profiles;
 use std::collections::VecDeque;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
-async fn apply_v2_reload_role(
+pub(super) async fn apply_v2_reload_role(
     config: &mut Config,
     session_source: &SessionSource,
 ) -> CodexResult<()> {
-    let Some(role_name) = session_source.get_agent_role() else {
+    let Some(resolved_role) =
+        ResolvedAgentRole::from_session_source(session_source).map_err(CodexErr::InvalidRequest)?
+    else {
         return Ok(());
     };
     let runtime_approval_policy = config.permissions.approval_policy.value();
     let runtime_approvals_reviewer = config.approvals_reviewer;
     let runtime_cwd = config.cwd.clone();
+    let runtime_workspace_roots = config.workspace_roots.clone();
+    let runtime_workspace_roots_explicit = config.workspace_roots_explicit;
     let parent_permission_profile = config.permissions.effective_permission_profile();
     let parent_network_proxy = config.permissions.network.clone();
 
-    apply_role_to_config(config, Some(&role_name))
+    apply_role_to_config_with_provenance(config, resolved_role.name(), resolved_role.provenance())
         .await
         .map_err(CodexErr::InvalidRequest)?;
     config
@@ -30,7 +35,10 @@ async fn apply_v2_reload_role(
         .map_err(|err| CodexErr::InvalidRequest(format!("approval_policy is invalid: {err}")))?;
     config.approvals_reviewer = runtime_approvals_reviewer;
     config.cwd = runtime_cwd;
-    let permission_profile = intersect_runtime_permission_profiles(
+    config.workspace_roots = runtime_workspace_roots;
+    config.workspace_roots_explicit = runtime_workspace_roots_explicit;
+    let permission_profile = intersect_role_runtime_permissions(
+        Some(&resolved_role),
         config.permissions.effective_permission_profile(),
         parent_permission_profile,
         config.cwd.as_path(),
@@ -546,6 +554,7 @@ impl AgentControl {
                 depth,
                 agent_path,
                 agent_role,
+                agent_role_provenance,
                 ..
             })) => {
                 let (session_source, agent_metadata) = self.prepare_thread_spawn(
@@ -555,6 +564,7 @@ impl AgentControl {
                     depth,
                     agent_path,
                     agent_role,
+                    agent_role_provenance,
                     /*preferred_agent_nickname*/ None,
                 )?;
                 (Some(session_source), agent_metadata)
@@ -910,18 +920,10 @@ impl AgentControl {
                 let child_resumed = if state.get_thread(child_thread_id).await.is_ok() {
                     true
                 } else {
-                    let child_session_source =
-                        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                            parent_thread_id,
-                            depth: child_depth,
-                            agent_path: None,
-                            agent_nickname: None,
-                            agent_role: None,
-                        });
                     match Box::pin(self.resume_single_agent_from_rollout(
                         config.clone(),
                         child_thread_id,
-                        child_session_source,
+                        SessionSource::Exec,
                     ))
                     .await
                     {
@@ -943,9 +945,9 @@ impl AgentControl {
 
     async fn resume_single_agent_from_rollout(
         &self,
-        config: Config,
+        mut config: Config,
         thread_id: ThreadId,
-        session_source: SessionSource,
+        fallback_session_source: SessionSource,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
         let state = self.upgrade()?;
         let stored_thread = state
@@ -962,7 +964,6 @@ impl AgentControl {
             .transpose()
             .map_err(|err| CodexErr::InvalidRequest(format!("invalid stored agent path: {err}")))?;
         let resumed_agent_nickname = stored_thread.agent_nickname.clone();
-        let resumed_agent_role = stored_thread.agent_role.clone();
         let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
@@ -971,6 +972,28 @@ impl AgentControl {
             history: Arc::new(history),
             rollout_path: stored_thread.rollout_path,
         });
+        let session_source = initial_history
+            .get_resumed_session_sources()
+            .map(|(source, _)| source)
+            .unwrap_or_else(|| stored_thread.source.clone());
+        let persisted_agent_metadata =
+            stored_thread.parent_thread_id.is_some() || stored_thread.agent_role.is_some();
+        let mut session_source = match session_source {
+            source @ SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }) => source,
+            _ if persisted_agent_metadata => {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "cannot safely resume agent thread {thread_id}: persisted thread-spawn source is missing"
+                )));
+            }
+            _ => fallback_session_source,
+        };
+        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. }) =
+            &mut session_source
+            && agent_role.is_none()
+        {
+            *agent_role = stored_thread.agent_role.clone();
+        }
+        apply_v2_reload_role(&mut config, &session_source).await?;
         let parent_thread_id = stored_thread.parent_thread_id;
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(
@@ -988,7 +1011,8 @@ impl AgentControl {
                 parent_thread_id,
                 depth,
                 agent_path,
-                agent_role: _,
+                agent_role,
+                agent_role_provenance,
                 agent_nickname: _,
             }) => self.prepare_thread_spawn(
                 &mut reservation,
@@ -996,7 +1020,8 @@ impl AgentControl {
                 parent_thread_id,
                 depth,
                 agent_path.or(resumed_agent_path),
-                resumed_agent_role,
+                agent_role,
+                agent_role_provenance,
                 resumed_agent_nickname,
             )?,
             other => (other, AgentMetadata::default()),

@@ -1411,6 +1411,7 @@ async fn session_end_skips_subagents() -> Result<()> {
             agent_path: None,
             agent_nickname: None,
             agent_role: None,
+            agent_role_provenance: None,
         },
     ] {
         let subagent = test
