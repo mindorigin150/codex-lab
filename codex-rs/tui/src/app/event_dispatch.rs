@@ -185,7 +185,6 @@ impl App {
                             match self
                                 .replace_chat_widget_with_app_server_thread(
                                     tui,
-                                    app_server,
                                     forked,
                                     ThreadAttachPresentation::SessionLineage,
                                     /*initial_user_message*/ None,
@@ -283,7 +282,6 @@ impl App {
                         match self
                             .replace_chat_widget_with_app_server_thread(
                                 tui,
-                                app_server,
                                 forked,
                                 ThreadAttachPresentation::PromptEdit,
                                 /*initial_user_message*/ None,
@@ -317,6 +315,7 @@ impl App {
             AppEvent::ConsolidateAgentMessage {
                 source,
                 cwd,
+                inline_visualization_context,
                 scrollback_reflow,
                 deferred_history_cell,
             } => {
@@ -324,6 +323,7 @@ impl App {
                     tui,
                     source,
                     cwd,
+                    inline_visualization_context,
                     scrollback_reflow,
                     deferred_history_cell,
                 )?;
@@ -496,6 +496,14 @@ impl App {
                 log_id,
             } => {
                 self.lookup_message_history_entry(thread_id, offset, log_id)
+                    .await?;
+            }
+            AppEvent::LookupMessageHistoryBatch {
+                thread_id,
+                cursor,
+                log_id,
+            } => {
+                self.lookup_message_history_batch(thread_id, cursor, log_id)
                     .await?;
             }
             AppEvent::ApproveRecentAutoReviewDenial { thread_id, id } => {
@@ -1011,17 +1019,38 @@ impl App {
                     RateLimitRefreshOrigin::ResetPicker { request_id },
                 );
             }
+            AppEvent::OpenRateLimitResetConfirmation {
+                picker_request_id,
+                confirmation_gate,
+                credit_id,
+                reset_title,
+                reset_detail,
+                reset_description,
+            } => {
+                self.chat_widget.show_rate_limit_reset_confirmation(
+                    picker_request_id,
+                    confirmation_gate,
+                    credit_id,
+                    reset_title,
+                    reset_detail,
+                    reset_description,
+                );
+            }
             AppEvent::ConsumeRateLimitResetCredit {
                 idempotency_key,
                 credit_id,
             } => {
-                let request_id = self.chat_widget.show_rate_limit_reset_consuming_popup();
-                self.consume_rate_limit_reset_credit(
-                    app_server,
-                    request_id,
-                    idempotency_key,
-                    credit_id,
-                );
+                if let Some(request_id) = self
+                    .chat_widget
+                    .start_rate_limit_reset_consumption(&idempotency_key)
+                {
+                    self.consume_rate_limit_reset_credit(
+                        app_server,
+                        request_id,
+                        idempotency_key,
+                        credit_id,
+                    );
+                }
             }
             AppEvent::RateLimitResetCreditConsumed {
                 request_id,

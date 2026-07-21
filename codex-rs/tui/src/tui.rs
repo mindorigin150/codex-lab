@@ -137,6 +137,7 @@ mod tests {
     use codex_config::types::NotificationCondition;
     use ratatui::layout::Position;
     use ratatui::layout::Rect;
+    use ratatui::text::Line;
 
     #[test]
     fn unfocused_notification_condition_is_suppressed_when_focused() {
@@ -231,6 +232,20 @@ mod tests {
         let mut moved = placement.clone();
         moved.row += 1;
         assert!(!overlay_formula_placements_match(&[placement], &[moved]));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn inserting_history_lines_schedules_a_draw() {
+        let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
+        let mut draw_rx = tui.draw_tx.subscribe();
+
+        tui.insert_history_lines(vec![Line::from("committed stream line")]);
+        tokio::time::advance(std::time::Duration::from_millis(20)).await;
+
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), draw_rx.recv()).await,
+            Ok(Ok(()))
+        ));
     }
 }
 
@@ -1095,7 +1110,7 @@ impl Tui {
             return Ok(());
         }
 
-        for batch in pending_history_lines.iter() {
+        for batch in pending_history_lines.drain(..) {
             let mode = if is_zellij && batch.wrap_policy == HistoryLineWrapPolicy::Terminal {
                 InsertHistoryMode::ZellijRaw
             } else {
@@ -1104,13 +1119,12 @@ impl Tui {
             let image_ids =
                 crate::insert_history::insert_history_rich_lines_with_mode_and_wrap_policy(
                     terminal,
-                    batch.lines.clone(),
+                    batch.lines,
                     mode,
                     batch.wrap_policy,
                 )?;
             formula_scrollback_image_ids.extend(image_ids);
         }
-        pending_history_lines.clear();
         Ok(())
     }
 

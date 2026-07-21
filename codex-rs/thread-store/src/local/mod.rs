@@ -6,6 +6,9 @@ mod list_threads;
 mod live_writer;
 mod model_context;
 mod read_thread;
+// This lands before the reader PRs that consume the shared lineage resolver.
+#[allow(dead_code)]
+mod rollout_lineage;
 mod search_threads;
 mod thread_history;
 mod thread_history_materialization;
@@ -39,10 +42,12 @@ use crate::LoadThreadHistoryParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
+use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadPage;
 use crate::ThreadSearchPage;
 use crate::ThreadStore;
@@ -278,6 +283,14 @@ impl LocalThreadStore {
     pub async fn list_items(&self, params: ListItemsParams) -> ThreadStoreResult<ItemPage> {
         thread_history::list_items(self, params).await
     }
+
+    /// Searches projection-backed visible messages within one paginated thread.
+    pub async fn search_thread_occurrences(
+        &self,
+        params: SearchThreadOccurrencesParams,
+    ) -> ThreadStoreResult<ThreadOccurrenceSearchPage> {
+        thread_history::search_thread_occurrences(self, params).await
+    }
 }
 
 impl ThreadStore for LocalThreadStore {
@@ -361,6 +374,13 @@ impl ThreadStore for LocalThreadStore {
         params: SearchThreadsParams,
     ) -> ThreadStoreFuture<'_, ThreadSearchPage> {
         Box::pin(async move { search_threads::search_threads(self, params).await })
+    }
+
+    fn search_thread_occurrences(
+        &self,
+        params: SearchThreadOccurrencesParams,
+    ) -> ThreadStoreFuture<'_, ThreadOccurrenceSearchPage> {
+        Box::pin(LocalThreadStore::search_thread_occurrences(self, params))
     }
 
     fn update_thread_metadata(

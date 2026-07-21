@@ -1,5 +1,6 @@
 //! User, assistant, reasoning, and streaming message history cells.
 
+use super::markdown_render_cache::MarkdownRenderCache;
 use super::*;
 use std::sync::Arc;
 
@@ -362,12 +363,17 @@ impl HistoryCell for AgentMessageCell {
 /// The cell snapshots `cwd` at construction so local file-link display remains aligned with the
 /// session that produced the message. Reusing the current process cwd during reflow would make old
 /// transcript content change meaning after a later `/cd` or resumed session.
+///
+/// Ordinary markdown caches its latest rich render. Visualization directives bypass that cache
+/// because resolving their local file links depends on filesystem state that can change later.
 #[derive(Debug)]
 pub(crate) struct AgentMarkdownCell {
     cell_id: u64,
     markdown_source: String,
     cwd: PathBuf,
     formulas: Arc<crate::formula_runtime::FormulaMessageState>,
+    inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
+    rendered_lines: Option<MarkdownRenderCache>,
 }
 
 impl AgentMarkdownCell {
@@ -376,14 +382,36 @@ impl AgentMarkdownCell {
     /// `markdown_source` must be the raw source accumulated by the stream controller, not already
     /// wrapped terminal lines. Passing rendered lines here would make future resize reflow preserve
     /// stale wrapping instead of repairing it.
+    #[cfg(test)]
     pub(crate) fn new(markdown_source: String, cwd: &Path) -> Self {
+        Self::new_with_inline_visualizations(
+            markdown_source,
+            cwd,
+            /*inline_visualization_context*/ None,
+        )
+    }
+
+    pub(crate) fn new_with_inline_visualizations(
+        markdown_source: String,
+        cwd: &Path,
+        inline_visualization_context: Option<
+            crate::inline_visualization::InlineVisualizationContext,
+        >,
+    ) -> Self {
         static NEXT_CELL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let formulas = crate::formula_runtime::FormulaMessageState::new(&markdown_source);
+        // Formula readiness changes asynchronously, so formula-bearing messages must re-render
+        // instead of retaining the source-only placeholder in the ordinary markdown cache.
+        let rendered_lines = (!formulas.has_formulas()
+            && !markdown_source.contains(crate::inline_visualization::DIRECTIVE_PREFIX))
+        .then(MarkdownRenderCache::default);
         Self {
             cell_id: NEXT_CELL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             markdown_source,
             cwd: cwd.to_path_buf(),
             formulas,
+            inline_visualization_context,
+            rendered_lines,
         }
     }
 
@@ -422,20 +450,27 @@ impl AgentMarkdownCell {
             return vec![RichHistoryLine::plain(HyperlinkLine::new(Line::default()))];
         };
         let Some(assets) = self.formulas.ready_assets(width) else {
-            return crate::markdown::render_markdown_agent_with_links_and_cwd(
-                &self.markdown_source,
-                Some(wrap_width),
-                Some(self.cwd.as_path()),
-            )
-            .into_iter()
-            .map(RichHistoryLine::plain)
-            .collect();
+            let render = || {
+                crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
+                    &self.markdown_source,
+                    Some(wrap_width),
+                    Some(self.cwd.as_path()),
+                    self.inline_visualization_context.as_ref(),
+                )
+            };
+            let lines = if let Some(rendered_lines) = &self.rendered_lines {
+                rendered_lines.render(width, render)
+            } else {
+                render()
+            };
+            return lines.into_iter().map(RichHistoryLine::plain).collect();
         };
         let masked = masked_formula_markdown(&self.markdown_source, &assets);
-        let rendered = crate::markdown::render_markdown_agent_with_links_and_cwd(
+        let rendered = crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
             &masked,
             Some(wrap_width),
             Some(self.cwd.as_path()),
+            self.inline_visualization_context.as_ref(),
         );
         materialize_formula_lines(rendered, &assets, wrap_width as u16)
     }
@@ -470,6 +505,10 @@ impl HistoryCell for AgentMarkdownCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         raw_lines_from_source(&self.markdown_source)
+    }
+
+    fn has_stable_transcript_height(&self) -> bool {
+        self.rendered_lines.is_some()
     }
 }
 
@@ -627,12 +666,16 @@ fn prefix_rich_formula_lines(lines: Vec<RichHistoryLine>) -> Vec<RichHistoryLine
         .collect()
 }
 
+#[cfg(test)]
+#[path = "messages_tests.rs"]
+mod tests;
+
 /// Transient active-cell representation of the mutable tail of an agent stream.
 ///
 /// During streaming, lines that have not yet been committed to scrollback because they belong to
 /// an in-progress table are displayed via this cell in the `active_cell` slot. It is replaced on
-/// every delta and cleared when the stream finalizes.
-#[derive(Debug)]
+/// deltas that change the visible tail and cleared when the stream finalizes.
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct StreamingAgentTailCell {
     lines: Vec<HyperlinkLine>,
     is_first_line: bool,

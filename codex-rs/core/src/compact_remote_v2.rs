@@ -305,10 +305,12 @@ async fn run_remote_compact_task_inner_impl(
         previous_window_id: new_window_ids.previous_window_id.map(|id| id.to_string()),
         window_id: Some(new_window_ids.window_id.to_string()),
     };
-    compaction_trace.record_installed(&CompactionCheckpointTracePayload {
-        input_history: &trace_input_history,
-        replacement_history: &new_history,
-    });
+    if let Some(trace_input_history) = trace_input_history.as_deref() {
+        compaction_trace.record_installed(&CompactionCheckpointTracePayload {
+            input_history: trace_input_history,
+            replacement_history: &new_history,
+        });
+    }
     sess.replace_compacted_history(
         compaction_turn_context.as_ref(),
         new_history,
@@ -516,7 +518,7 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
                 approx_token_count(text)
             }
-            ContentItem::InputImage { .. } => 0,
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => 0,
         })
         .sum()
 }
@@ -556,7 +558,9 @@ fn truncate_message_text_to_token_budget(
                     truncated_content.push(content_item);
                 }
             }
-            ContentItem::InputImage { .. } => truncated_content.push(content_item),
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
+                truncated_content.push(content_item);
+            }
         }
     }
 

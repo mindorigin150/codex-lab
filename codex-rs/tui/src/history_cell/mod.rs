@@ -73,6 +73,7 @@ impl From<Line<'static>> for RichHistoryLine {
 use crate::terminal_hyperlinks::plain_hyperlink_lines;
 use crate::terminal_hyperlinks::prefix_hyperlink_lines;
 use crate::terminal_hyperlinks::visible_lines;
+use crate::terminal_hyperlinks::visible_lines_ref;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 #[cfg(test)]
@@ -148,6 +149,7 @@ mod approvals;
 mod base;
 mod exec;
 mod hook_cell;
+mod markdown_render_cache;
 mod mcp;
 mod messages;
 mod notices;
@@ -331,6 +333,14 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
             .unwrap_or(0)
     }
 
+    /// Whether the transcript height remains valid across later overlay renders.
+    ///
+    /// Cells backed by external state should return `false` so the pager remeasures them before
+    /// rendering instead of reusing a height that may now clip their content.
+    fn has_stable_transcript_height(&self) -> bool {
+        true
+    }
+
     fn is_stream_continuation(&self) -> bool {
         false
     }
@@ -353,7 +363,7 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
 impl Renderable for Box<dyn HistoryCell> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let hyperlink_lines = self.display_hyperlink_lines(area.width);
-        let lines = visible_lines(hyperlink_lines.clone());
+        let lines = visible_lines_ref(&hyperlink_lines);
         let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         let y = if area.height == 0 {
             0
