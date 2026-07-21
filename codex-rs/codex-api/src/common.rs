@@ -14,9 +14,13 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 pub const WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY: &str = "ws_request_header_traceparent";
 pub const WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY: &str = "ws_request_header_tracestate";
@@ -346,6 +350,12 @@ pub struct ResponseStream {
     pub rx_event: mpsc::Receiver<Result<ResponseEvent, ApiError>>,
     /// Server-assigned `x-request-id` response header, when present.
     pub upstream_request_id: Option<String>,
+    pub(crate) consumer_drop: Option<ResponseStreamConsumerDrop>,
+}
+
+pub(crate) struct ResponseStreamConsumerDrop {
+    pub cancellation: CancellationToken,
+    pub provider_terminal: Arc<AtomicBool>,
 }
 
 impl Stream for ResponseStream {
@@ -353,5 +363,15 @@ impl Stream for ResponseStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx_event.poll_recv(cx)
+    }
+}
+
+impl Drop for ResponseStream {
+    fn drop(&mut self) {
+        if let Some(consumer_drop) = self.consumer_drop.as_ref()
+            && !consumer_drop.provider_terminal.load(Ordering::Acquire)
+        {
+            consumer_drop.cancellation.cancel();
+        }
     }
 }

@@ -515,6 +515,7 @@ async fn conversation_webrtc_start_posts_generated_session() -> Result<()> {
         response_headers: Vec::new(),
         accept_delay: Some(sideband_accept_delay),
         close_after_requests: false,
+        wait_for_client_close: false,
     }])
     .await;
 
@@ -707,6 +708,7 @@ async fn conversation_webrtc_start_uses_avas_query() -> Result<()> {
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
+        wait_for_client_close: false,
     }])
     .await;
 
@@ -807,6 +809,7 @@ async fn conversation_webrtc_default_v1_ignores_configured_v2_voice() -> Result<
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
+        wait_for_client_close: false,
     }])
     .await;
 
@@ -942,6 +945,7 @@ async fn conversation_webrtc_start_uses_configured_call_base_url_for_avas() -> R
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
+        wait_for_client_close: false,
     }])
     .await;
 
@@ -1039,6 +1043,7 @@ async fn conversation_webrtc_close_while_sideband_connecting_drops_pending_join(
         response_headers: Vec::new(),
         accept_delay: Some(Duration::from_millis(500)),
         close_after_requests: false,
+        wait_for_client_close: false,
     }])
     .await;
 
@@ -4336,6 +4341,7 @@ async fn inbound_handoff_request_steers_active_turn() -> Result<()> {
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
+        wait_for_client_close: false,
     }])
     .await;
 

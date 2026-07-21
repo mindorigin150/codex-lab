@@ -96,6 +96,7 @@ pub fn spawn_response_stream(
     ResponseStream {
         rx_event,
         upstream_request_id,
+        consumer_drop: None,
     }
 }
 

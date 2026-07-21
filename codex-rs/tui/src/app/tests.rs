@@ -18,6 +18,7 @@ use crate::app_backtrack::user_count;
 use crate::app_event::HistoryBatchEntryResponse;
 
 use crate::chatwidget::ChatWidgetInit;
+use crate::chatwidget::DeferredPromptEdit;
 use crate::chatwidget::create_initial_user_message;
 use crate::chatwidget::tests::helpers::render_bottom_popup;
 use crate::chatwidget::tests::helpers::set_active_cell;
@@ -715,6 +716,88 @@ async fn replay_thread_snapshot_restores_draft_and_queued_input() {
             "draft-only replay should not auto-submit queued input"
         );
     }
+}
+
+#[tokio::test]
+async fn cancelled_turn_restore_waits_for_its_source_thread() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let source_thread_id = ThreadId::new();
+    let source_session = test_thread_session(source_thread_id, test_path_buf("/tmp/source"));
+    app.thread_event_channels.insert(
+        source_thread_id,
+        ThreadEventChannel::new_with_session(
+            THREAD_EVENT_CHANNEL_CAPACITY,
+            source_session.clone(),
+            Vec::new(),
+        ),
+    );
+    app.activate_thread_channel(source_thread_id).await;
+    app.chat_widget.handle_thread_session(source_session);
+    app.store_active_thread_receiver().await;
+
+    app.chat_widget.handle_thread_session(test_thread_session(
+        ThreadId::new(),
+        test_path_buf("/tmp/other"),
+    ));
+    let prompt = crate::chatwidget::UserMessage::from("restore on source");
+    app.route_cancelled_turn_edit(source_thread_id, prompt.clone())
+        .await;
+
+    let snapshot = {
+        let store = app.thread_event_channels[&source_thread_id]
+            .store
+            .lock()
+            .await;
+        assert_eq!(
+            store.input_state.as_ref().unwrap().deferred_prompt_edit,
+            Some(DeferredPromptEdit::RestoreCancelledTurn(prompt.clone()))
+        );
+        store.snapshot()
+    };
+    while app_event_rx.try_recv().is_ok() {}
+
+    app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+
+    assert_matches!(
+        std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .find(|event| matches!(event, AppEvent::RestoreCancelledTurn { .. })),
+        Some(AppEvent::RestoreCancelledTurn {
+            thread_id,
+            prompt: restored,
+        }) if thread_id == source_thread_id && restored == prompt
+    );
+
+    app.store_active_thread_receiver().await;
+    app.chat_widget.handle_thread_session(test_thread_session(
+        ThreadId::new(),
+        test_path_buf("/tmp/other-again"),
+    ));
+    app.defer_prompt_edit(
+        source_thread_id,
+        DeferredPromptEdit::Fork {
+            nth_user_message: 2,
+            prompt: prompt.clone(),
+        },
+    )
+    .await;
+    let snapshot = app.thread_event_channels[&source_thread_id]
+        .store
+        .lock()
+        .await
+        .snapshot();
+    while app_event_rx.try_recv().is_ok() {}
+
+    app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+
+    assert_matches!(
+        std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .find(|event| matches!(event, AppEvent::ForkSessionForPromptEdit { .. })),
+        Some(AppEvent::ForkSessionForPromptEdit {
+            thread_id,
+            nth_user_message: 2,
+            prompt: restored,
+        }) if thread_id == source_thread_id && restored == prompt
+    );
 }
 
 #[tokio::test]

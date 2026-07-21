@@ -191,6 +191,14 @@ impl App {
         ));
     }
 
+    pub(crate) fn apply_cancelled_turn_edit(&mut self, thread_id: ThreadId, prompt: UserMessage) {
+        self.app_event_tx.send(AppEvent::ForkSessionForPromptEdit {
+            thread_id,
+            nth_user_message: user_count(&self.transcript_cells) - 1,
+            prompt,
+        });
+    }
+
     /// Open transcript overlay (enters alternate screen and shows full transcript).
     pub(crate) fn open_transcript_overlay(&mut self, tui: &mut tui::Tui) {
         let _ = tui.enter_alt_screen();

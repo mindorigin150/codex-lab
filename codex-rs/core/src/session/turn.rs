@@ -1224,6 +1224,7 @@ async fn run_sampling_request(
             &sess,
             &turn_context,
             ResponsesStreamRequest::Sampling,
+            Some(&cancellation_token),
         )
         .await?;
         turn_context.turn_timing_state.record_sampling_retry();

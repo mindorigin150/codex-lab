@@ -1,6 +1,7 @@
 use crate::auth::SharedAuthProvider;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
+use crate::common::ResponseStreamConsumerDrop;
 use crate::common::ResponsesWsRequest;
 use crate::common::SafetyBufferingTreatment;
 use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
@@ -26,6 +27,8 @@ use serde_json::Value;
 use serde_json::map::Map as JsonMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -35,6 +38,7 @@ use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::Span;
 use tracing::debug;
@@ -268,6 +272,10 @@ impl ResponsesWebsocketConnection {
             connection_reused,
         };
         let request_text = serialize_websocket_request(&request)?;
+        let consumer_drop_cancellation = CancellationToken::new();
+        let provider_terminal = Arc::new(AtomicBool::new(false));
+        let task_consumer_drop_cancellation = consumer_drop_cancellation.clone();
+        let task_provider_terminal = Arc::clone(&provider_terminal);
 
         let current_span = Span::current();
         tokio::spawn(
@@ -287,18 +295,23 @@ impl ResponsesWebsocketConnection {
                         .send(Ok(ResponseEvent::ServerReasoningIncluded(true)))
                         .await;
                 }
-                let mut guard = stream.lock().await;
-                let result = {
-                    let Some(ws_stream) = guard.as_mut() else {
-                        let _ = tx_event
-                            .send(Err(ApiError::Stream(
-                                "websocket connection is closed".to_string(),
-                            )))
-                            .await;
-                        return;
-                    };
-
-                    run_websocket_response_stream(
+                let mut guard = tokio::select! {
+                    biased;
+                    _ = task_consumer_drop_cancellation.cancelled() => return,
+                    guard = stream.lock() => guard,
+                };
+                let Some(ws_stream) = guard.as_mut() else {
+                    let _ = tx_event
+                        .send(Err(ApiError::Stream(
+                            "websocket connection is closed".to_string(),
+                        )))
+                        .await;
+                    return;
+                };
+                let result = tokio::select! {
+                    biased;
+                    _ = task_consumer_drop_cancellation.cancelled() => None,
+                    result = run_websocket_response_stream(
                         ws_stream,
                         tx_event.clone(),
                         request_text,
@@ -306,8 +319,16 @@ impl ResponsesWebsocketConnection {
                         telemetry,
                         turn_state.as_deref(),
                         &timing_log_context,
-                    )
-                    .await
+                        task_provider_terminal.as_ref(),
+                    ) => Some(result),
+                };
+                let Some(result) = result else {
+                    if !task_provider_terminal.load(Ordering::Acquire) {
+                        let cancelled_stream = guard.take();
+                        drop(guard);
+                        drop(cancelled_stream);
+                    }
+                    return;
                 };
 
                 if let Err(err) = result {
@@ -325,6 +346,10 @@ impl ResponsesWebsocketConnection {
         Ok(ResponseStream {
             rx_event,
             upstream_request_id: None,
+            consumer_drop: Some(ResponseStreamConsumerDrop {
+                cancellation: consumer_drop_cancellation,
+                provider_terminal,
+            }),
         })
     }
 }
@@ -663,6 +688,7 @@ fn json_header_value(value: &Value) -> Option<HeaderValue> {
     HeaderValue::from_str(&value).ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_websocket_response_stream(
     ws_stream: &mut WsStream,
     tx_event: mpsc::Sender<std::result::Result<ResponseEvent, ApiError>>,
@@ -671,6 +697,7 @@ async fn run_websocket_response_stream(
     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     turn_state: Option<&OnceLock<String>>,
     timing_log_context: &ResponsesWebsocketTimingLogContext,
+    provider_terminal: &AtomicBool,
 ) -> Result<(), ApiError> {
     let mut last_server_model: Option<String> = None;
     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
@@ -783,6 +810,9 @@ async fn run_websocket_response_stream(
                 match process_responses_event(event) {
                     Ok(Some(event)) => {
                         let is_completed = matches!(event, ResponseEvent::Completed { .. });
+                        if is_completed {
+                            provider_terminal.store(true, Ordering::Release);
+                        }
                         let _ = tx_event.send(Ok(event)).await;
                         if is_completed {
                             break;

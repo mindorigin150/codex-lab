@@ -724,6 +724,66 @@ async fn responses_websocket_reuses_connection_after_session_drop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_consumer_drop_closes_connection_before_reuse() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server_with_headers(vec![
+        WebSocketConnectionConfig {
+            requests: vec![Vec::new()],
+            response_headers: Vec::new(),
+            accept_delay: None,
+            close_after_requests: false,
+            wait_for_client_close: true,
+        },
+        WebSocketConnectionConfig {
+            requests: vec![vec![ev_response_created("resp-2"), ev_completed("resp-2")]],
+            response_headers: Vec::new(),
+            accept_delay: None,
+            close_after_requests: true,
+            wait_for_client_close: false,
+        },
+    ])
+    .await;
+
+    let harness = websocket_harness(&server).await;
+    let prompt_one = prompt_with_input(vec![message_item("cancel")]);
+    let prompt_two = prompt_with_input(vec![message_item("again")]);
+
+    {
+        let mut client_session = harness.client.new_session();
+        let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
+        let stream = client_session
+            .stream(
+                &prompt_one,
+                &harness.model_info,
+                &harness.session_telemetry,
+                harness.effort.clone(),
+                harness.summary,
+                /*service_tier*/ None,
+                &responses_metadata,
+                &codex_rollout_trace::InferenceTraceContext::disabled(),
+            )
+            .await
+            .expect("websocket stream failed");
+        server.wait_for_request(0, 0).await;
+        drop(stream);
+    }
+
+    let mut client_session = harness.client.new_session();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        stream_until_complete(&mut client_session, &harness, &prompt_two),
+    )
+    .await
+    .expect("timed out waiting for replacement websocket connection");
+
+    assert_eq!(server.handshakes().len(), 2);
+    assert_eq!(server.connections().len(), 2);
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_websocket_sends_responses_lite_metadata_per_request() {
     skip_if_no_network!();
 
@@ -1331,6 +1391,7 @@ async fn responses_websocket_emits_reasoning_included_event() {
         response_headers: vec![("X-Reasoning-Included".to_string(), "true".to_string())],
         accept_delay: None,
         close_after_requests: true,
+        wait_for_client_close: false,
     }])
     .await;
 
@@ -1406,6 +1467,7 @@ async fn responses_websocket_emits_rate_limit_events() {
         ],
         accept_delay: None,
         close_after_requests: true,
+        wait_for_client_close: false,
     }])
     .await;
 
@@ -2157,6 +2219,7 @@ async fn responses_websocket_v2_surfaces_terminal_error_without_close_handshake(
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
+        wait_for_client_close: false,
     }])
     .await;
 

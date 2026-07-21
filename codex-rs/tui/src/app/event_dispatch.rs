@@ -7,6 +7,7 @@ use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_server_session::ForkGoalContinuation;
+use crate::chatwidget::DeferredPromptEdit;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration_flow::ExternalAgentConfigMigrationFlowOutcome;
 #[cfg(target_os = "windows")]
@@ -243,6 +244,14 @@ impl App {
                 mut prompt,
             } => {
                 if self.chat_widget.thread_id() != Some(thread_id) {
+                    self.defer_prompt_edit(
+                        thread_id,
+                        DeferredPromptEdit::Fork {
+                            nth_user_message,
+                            prompt,
+                        },
+                    )
+                    .await;
                     return Ok(AppRunControl::Continue);
                 }
                 self.session_telemetry.counter(
@@ -489,6 +498,9 @@ impl App {
                     },
                 )
                 .await;
+            }
+            AppEvent::RestoreCancelledTurn { thread_id, prompt } => {
+                self.route_cancelled_turn_edit(thread_id, prompt).await;
             }
             AppEvent::AppendMessageHistoryEntry { thread_id, text } => {
                 self.append_message_history_entry(thread_id, text);

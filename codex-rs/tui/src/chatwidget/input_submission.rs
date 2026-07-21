@@ -411,6 +411,7 @@ impl ChatWidget {
         }
 
         if render_in_history {
+            self.record_cancel_edit_candidate(submitted_message.clone());
             self.safety_buffering_prompt = Some(submitted_message.clone());
             if !render_before_submit {
                 self.on_user_message_display(user_message_display_for_history(

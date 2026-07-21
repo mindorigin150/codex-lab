@@ -6,10 +6,44 @@
 
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
+use crate::chatwidget::DeferredPromptEdit;
 use crate::chatwidget::ThreadInputStateRestoreMode;
+use crate::chatwidget::UserMessage;
 use crate::session_resume::read_session_model;
 
 impl App {
+    pub(super) async fn route_cancelled_turn_edit(
+        &mut self,
+        thread_id: ThreadId,
+        prompt: UserMessage,
+    ) {
+        if self.chat_widget.thread_id() == Some(thread_id) {
+            self.apply_cancelled_turn_edit(thread_id, prompt);
+        } else {
+            self.defer_prompt_edit(thread_id, DeferredPromptEdit::RestoreCancelledTurn(prompt))
+                .await;
+        }
+    }
+
+    #[expect(
+        clippy::unwrap_used,
+        reason = "deferred prompt edits only target threads whose input state was saved"
+    )]
+    pub(super) async fn defer_prompt_edit(
+        &mut self,
+        thread_id: ThreadId,
+        deferred_prompt_edit: DeferredPromptEdit,
+    ) {
+        self.thread_event_channels[&thread_id]
+            .store
+            .lock()
+            .await
+            .input_state
+            .as_mut()
+            .unwrap()
+            .deferred_prompt_edit = Some(deferred_prompt_edit);
+    }
+
     pub(super) async fn shutdown_current_thread(&mut self, app_server: &mut AppServerSession) {
         if let Some(thread_id) = self.chat_widget.thread_id() {
             if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
@@ -566,7 +600,7 @@ impl App {
         op: &AppCommand,
     ) -> Result<bool> {
         match op {
-            AppCommand::Interrupt => {
+            AppCommand::Interrupt { .. } => {
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
                     let mut interrupt_turn_id = turn_id;
                     for retried_after_turn_mismatch in [false, true] {

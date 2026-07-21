@@ -7,6 +7,38 @@ use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;
 
 impl ChatWidget {
+    pub(super) fn record_cancel_edit_candidate(&mut self, prompt: UserMessage) {
+        self.cancel_edit.prompt = Some(prompt);
+        self.cancel_edit.eligible = true;
+        self.cancel_edit.armed = false;
+    }
+
+    pub(super) fn record_visible_turn_activity(&mut self) {
+        self.cancel_edit.eligible = false;
+        self.cancel_edit.armed = false;
+    }
+
+    pub(super) fn arm_cancel_edit(&mut self) {
+        self.cancel_edit.armed = self.cancel_edit.eligible
+            && self.cancel_edit.prompt.is_some()
+            && self.bottom_pane.composer_is_empty()
+            && self.input_queue.pending_steers.is_empty()
+            && !self.has_queued_follow_up_messages()
+            && !self.active_side_conversation;
+    }
+
+    fn take_armed_cancel_edit_prompt(&mut self, reason: TurnAbortReason) -> Option<UserMessage> {
+        (reason == TurnAbortReason::Interrupted
+            && self.cancel_edit.armed
+            && self.cancel_edit.eligible)
+            .then(|| self.cancel_edit.prompt.take())
+            .flatten()
+    }
+
+    pub(super) fn clear_cancel_edit(&mut self) {
+        self.cancel_edit = CancelEditState::default();
+    }
+
     pub(crate) fn set_initial_user_message_submit_suppressed(&mut self, suppressed: bool) {
         self.suppress_initial_user_message_submit = suppressed;
     }
@@ -121,13 +153,20 @@ impl ChatWidget {
     /// or review completion.
     /// When there are queued user messages, restore them into the composer
     /// separated by newlines rather than auto-submitting the next one.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "an interruptible submitted turn is attached to a thread"
+    )]
     pub(super) fn on_interrupted_turn(&mut self, reason: TurnAbortReason) {
+        let cancelled_prompt = self.take_armed_cancel_edit_prompt(reason);
         // Finalize, log a gentle prompt, and clear running state.
         self.finalize_turn();
         let send_pending_steers_immediately =
             self.input_queue.submit_pending_steers_after_interrupt;
         self.input_queue.submit_pending_steers_after_interrupt = false;
-        if self.interrupted_turn_notice_mode != InterruptedTurnNoticeMode::Suppress {
+        if cancelled_prompt.is_none()
+            && self.interrupted_turn_notice_mode != InterruptedTurnNoticeMode::Suppress
+        {
             if send_pending_steers_immediately {
                 self.add_to_history(history_cell::new_info_event(
                     "Model interrupted to submit steer instructions.".to_owned(),
@@ -159,6 +198,12 @@ impl ChatWidget {
             }
         } else if let Some(combined) = self.drain_pending_messages_for_restore() {
             self.restore_composer_state(combined);
+        }
+        if let Some(prompt) = cancelled_prompt {
+            self.app_event_tx.send(AppEvent::RestoreCancelledTurn {
+                thread_id: self.thread_id.unwrap(),
+                prompt,
+            });
         }
         self.refresh_pending_input_preview();
         self.request_redraw();
@@ -334,6 +379,8 @@ impl ChatWidget {
         };
         Some(ThreadInputState {
             composer: composer.has_content().then_some(composer),
+            cancel_edit: self.cancel_edit.clone(),
+            deferred_prompt_edit: None,
             safety_buffering_prompt: self.safety_buffering_prompt.clone(),
             pending_steers: self
                 .input_queue
@@ -371,6 +418,10 @@ impl ChatWidget {
         })
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "deferred prompt edits are restored only after attaching their thread"
+    )]
     pub(crate) fn restore_thread_input_state(
         &mut self,
         input_state: Option<ThreadInputState>,
@@ -379,7 +430,16 @@ impl ChatWidget {
         let preserve_in_flight_turn = restore_mode.preserve_in_flight_turn;
         let restored_task_running =
             preserve_in_flight_turn && input_state.as_ref().is_some_and(|state| state.task_running);
+        let mut deferred_prompt_edit = None;
         if let Some(input_state) = input_state {
+            self.cancel_edit = if preserve_in_flight_turn {
+                input_state.cancel_edit
+            } else {
+                CancelEditState::default()
+            };
+            if preserve_in_flight_turn {
+                deferred_prompt_edit = input_state.deferred_prompt_edit;
+            }
             self.current_collaboration_mode = input_state.current_collaboration_mode;
             self.active_collaboration_mask = input_state.active_collaboration_mask;
             self.safety_buffering_prompt = input_state.safety_buffering_prompt;
@@ -446,6 +506,7 @@ impl ChatWidget {
                 UserMessageHistoryRecord::UserMessageText,
             );
         } else {
+            self.clear_cancel_edit();
             self.turn_lifecycle
                 .restore_running(/*running*/ false, Instant::now());
             self.safety_buffering_prompt = None;
@@ -464,6 +525,25 @@ impl ChatWidget {
         }
         self.refresh_pending_input_preview();
         self.request_redraw();
+        if let Some(deferred_prompt_edit) = deferred_prompt_edit {
+            let thread_id = self.thread_id.unwrap();
+            match deferred_prompt_edit {
+                DeferredPromptEdit::RestoreCancelledTurn(prompt) => {
+                    self.app_event_tx
+                        .send(AppEvent::RestoreCancelledTurn { thread_id, prompt });
+                }
+                DeferredPromptEdit::Fork {
+                    nth_user_message,
+                    prompt,
+                } => {
+                    self.app_event_tx.send(AppEvent::ForkSessionForPromptEdit {
+                        thread_id,
+                        nth_user_message,
+                        prompt,
+                    });
+                }
+            }
+        }
     }
 
     pub(crate) fn set_queue_autosend_suppressed(&mut self, suppressed: bool) {

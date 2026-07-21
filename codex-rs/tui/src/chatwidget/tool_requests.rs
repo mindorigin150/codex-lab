@@ -7,6 +7,7 @@ use super::*;
 
 impl ChatWidget {
     pub(super) fn on_exec_approval_request(&mut self, _id: String, ev: ExecApprovalRequestEvent) {
+        self.record_visible_turn_activity();
         self.defer_or_handle(
             ev,
             InterruptManager::push_exec_approval,
@@ -19,6 +20,7 @@ impl ChatWidget {
         _id: String,
         ev: ApplyPatchApprovalRequestEvent,
     ) {
+        self.record_visible_turn_activity();
         self.defer_or_handle(
             ev,
             InterruptManager::push_apply_patch_approval,
@@ -256,6 +258,7 @@ impl ChatWidget {
         request_id: AppServerRequestId,
         params: McpServerElicitationRequestParams,
     ) {
+        self.record_visible_turn_activity();
         self.defer_or_handle(
             (request_id, params),
             |q, (request_id, params)| q.push_elicitation(request_id, params),
@@ -264,6 +267,7 @@ impl ChatWidget {
     }
 
     pub(super) fn on_request_user_input(&mut self, ev: ToolRequestUserInputParams) {
+        self.record_visible_turn_activity();
         self.defer_or_handle(
             ev,
             InterruptManager::push_user_input,
@@ -272,6 +276,7 @@ impl ChatWidget {
     }
 
     pub(super) fn on_request_permissions(&mut self, ev: RequestPermissionsEvent) {
+        self.record_visible_turn_activity();
         self.defer_or_handle(
             ev,
             InterruptManager::push_request_permissions,

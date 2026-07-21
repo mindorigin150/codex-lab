@@ -604,6 +604,7 @@ fn realtime_sideband_connection(
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: true,
+        wait_for_client_close: false,
     }
 }
 
@@ -612,6 +613,7 @@ fn open_realtime_sideband_connection(
 ) -> WebSocketConnectionConfig {
     WebSocketConnectionConfig {
         close_after_requests: false,
+        wait_for_client_close: false,
         ..realtime_sideband_connection(realtime_server_events)
     }
 }
@@ -1406,6 +1408,7 @@ async fn realtime_webrtc_start_emits_sdp_notification() -> Result<()> {
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
+        wait_for_client_close: false,
     }])
     .await;
 

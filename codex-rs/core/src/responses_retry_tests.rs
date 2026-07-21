@@ -1,9 +1,30 @@
 use super::ResponsesStreamRequest;
 use super::log_retry;
+use super::wait_for_retry_delay;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::error::CodexErr;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing_test::internal::MockWriter;
+
+#[tokio::test]
+async fn retry_delay_returns_turn_aborted_when_cancelled() {
+    let cancellation_token = CancellationToken::new();
+    let cancel = cancellation_token.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        cancel.cancel();
+    });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_for_retry_delay(Duration::from_secs(60), Some(&cancellation_token)),
+    )
+    .await
+    .expect("retry delay should observe cancellation");
+
+    assert!(matches!(result, Err(CodexErr::TurnAborted)));
+}
 
 #[tokio::test]
 async fn sampling_retry_logs_stream_error_context() {

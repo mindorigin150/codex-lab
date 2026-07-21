@@ -221,6 +221,7 @@ async fn websocket_first_turn_handles_handshake_delay_with_startup_prewarm() -> 
         // Delay handshake so turn processing must tolerate websocket startup latency.
         accept_delay: Some(Duration::from_millis(150)),
         close_after_requests: true,
+        wait_for_client_close: false,
     }])
     .await;
 

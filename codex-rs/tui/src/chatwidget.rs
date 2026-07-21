@@ -425,6 +425,7 @@ mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
 mod usage;
 mod user_messages;
+pub(crate) use self::user_messages::DeferredPromptEdit;
 use self::user_messages::PendingSteer;
 use self::user_messages::PendingSteerCompareKey;
 use self::user_messages::QueueDrain;
@@ -674,6 +675,7 @@ pub(crate) struct ChatWidget {
     suppress_initial_user_message_submit: bool,
     input_queue: InputQueueState,
     safety_buffering_prompt: Option<UserMessage>,
+    cancel_edit: CancelEditState,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
     chat_keymap: ChatKeymap,
     /// Keybinding to show for popping the most-recently queued message back
@@ -794,6 +796,13 @@ pub(crate) enum InterruptedTurnNoticeMode {
     #[default]
     Default,
     Suppress,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CancelEditState {
+    prompt: Option<UserMessage>,
+    eligible: bool,
+    armed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1212,6 +1221,9 @@ impl ChatWidget {
     }
 
     fn add_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
+        if self.turn_lifecycle.agent_turn_running && !cell.display_lines(u16::MAX).is_empty() {
+            self.record_visible_turn_activity();
+        }
         // Keep the placeholder session header as the active cell until real session info arrives,
         // so we can merge headers instead of committing a duplicate box to history.
         let keep_placeholder_header_active = !self.is_session_configured()
@@ -1770,15 +1782,20 @@ impl ChatWidget {
     }
 
     pub(crate) fn prepare_local_op_submission(&mut self, op: &AppCommand) {
-        if matches!(op, AppCommand::Interrupt) && self.turn_lifecycle.agent_turn_running {
-            if let Some(controller) = self.stream_controller.as_mut() {
-                controller.clear_queue();
+        if let AppCommand::Interrupt { behavior } = op {
+            if *behavior == crate::app_command::InterruptBehavior::RestorePromptIfNoOutput {
+                self.arm_cancel_edit();
             }
-            if let Some(controller) = self.plan_stream_controller.as_mut() {
-                controller.clear_queue();
+            if self.turn_lifecycle.agent_turn_running {
+                if let Some(controller) = self.stream_controller.as_mut() {
+                    controller.clear_queue();
+                }
+                if let Some(controller) = self.plan_stream_controller.as_mut() {
+                    controller.clear_queue();
+                }
+                self.clear_active_stream_tail();
+                self.request_redraw();
             }
-            self.clear_active_stream_tail();
-            self.request_redraw();
         }
     }
 

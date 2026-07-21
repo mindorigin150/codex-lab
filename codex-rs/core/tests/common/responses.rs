@@ -498,6 +498,9 @@ pub struct WebSocketConnectionConfig {
     /// Tests can disable this to simulate a peer that surfaces a terminal event but never
     /// completes the close handshake.
     pub close_after_requests: bool,
+    /// Whether the server should wait for the client to close the connection after all scripted
+    /// requests before accepting the next connection.
+    pub wait_for_client_close: bool,
 }
 
 pub struct WebSocketTestServer {
@@ -1237,6 +1240,7 @@ pub async fn start_websocket_server(connections: Vec<Vec<Vec<Value>>>) -> WebSoc
             response_headers: Vec::new(),
             accept_delay: None,
             close_after_requests: true,
+            wait_for_client_close: false,
         })
         .collect();
     start_websocket_server_with_headers(connections).await
@@ -1334,6 +1338,7 @@ pub async fn start_websocket_server_with_headers(
                 log.len() - 1
             };
             let close_after_requests = connection.close_after_requests;
+            let wait_for_client_close = connection.wait_for_client_close;
             for request_events in connection.requests {
                 let Some(Ok(message)) = ws_stream.next().await else {
                     break;
@@ -1397,7 +1402,14 @@ pub async fn start_websocket_server_with_headers(
                 }
             }
 
-            if close_after_requests {
+            if wait_for_client_close {
+                while let Some(message) = ws_stream.next().await {
+                    match message {
+                        Ok(Message::Close(_)) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            } else if close_after_requests {
                 let _ = ws_stream.close(None).await;
             } else {
                 let _ = shutdown_rx.await;

@@ -9,6 +9,7 @@ use crate::util::backoff;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +20,7 @@ pub(crate) enum ResponsesStreamRequest {
 
 /// Handles a retryable stream error and returns `Ok(())` when the caller should
 /// retry the request loop.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_retryable_response_stream_error(
     retries: &mut u64,
     max_retries: u64,
@@ -27,20 +29,33 @@ pub(crate) async fn handle_retryable_response_stream_error(
     sess: &Session,
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
+    cancellation_token: Option<&CancellationToken>,
 ) -> Result<(), CodexErr> {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CodexErr::TurnAborted);
+    }
+
     if *retries >= max_retries
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
             &turn_context.model_info,
         )
     {
-        sess.send_event(
+        let send_warning = sess.send_event(
             turn_context,
             EventMsg::Warning(WarningEvent {
                 message: format!("Falling back from WebSockets to HTTPS transport. {err:#}"),
             }),
-        )
-        .await;
+        );
+        if let Some(cancellation_token) = cancellation_token {
+            tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+                _ = send_warning => {}
+            }
+        } else {
+            send_warning.await;
+        }
         *retries = 0;
         return Ok(());
     }
@@ -64,18 +79,42 @@ pub(crate) async fn handle_retryable_response_stream_error(
         if report_error {
             // Surface retry information to any UI/front-end so the user understands what is
             // happening instead of staring at a seemingly frozen screen.
-            sess.notify_stream_error(
+            let notify = sess.notify_stream_error(
                 turn_context,
                 format!("Reconnecting... {retry_count}/{max_retries}"),
                 err,
-            )
-            .await;
+            );
+            if let Some(cancellation_token) = cancellation_token {
+                tokio::select! {
+                    biased;
+                    _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+                    _ = notify => {}
+                }
+            } else {
+                notify.await;
+            }
         }
-        tokio::time::sleep(delay).await;
+        wait_for_retry_delay(delay, cancellation_token).await?;
         return Ok(());
     }
 
     Err(err)
+}
+
+async fn wait_for_retry_delay(
+    delay: Duration,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<(), CodexErr> {
+    if let Some(cancellation_token) = cancellation_token {
+        tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => Err(CodexErr::TurnAborted),
+            _ = tokio::time::sleep(delay) => Ok(()),
+        }
+    } else {
+        tokio::time::sleep(delay).await;
+        Ok(())
+    }
 }
 
 fn log_retry(

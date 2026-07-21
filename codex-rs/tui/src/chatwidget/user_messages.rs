@@ -24,6 +24,7 @@ use codex_protocol::user_input::TextElement;
 use codex_utils_plugins::mention_syntax::PLUGIN_TEXT_MENTION_SIGIL;
 use codex_utils_plugins::mention_syntax::TOOL_MENTION_SIGIL;
 
+use super::CancelEditState;
 use super::ChatWidget;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,8 +122,19 @@ impl ThreadComposerState {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DeferredPromptEdit {
+    RestoreCancelledTurn(UserMessage),
+    Fork {
+        nth_user_message: usize,
+        prompt: UserMessage,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
     pub(super) composer: Option<ThreadComposerState>,
+    pub(super) cancel_edit: CancelEditState,
+    pub(crate) deferred_prompt_edit: Option<DeferredPromptEdit>,
     pub(super) safety_buffering_prompt: Option<UserMessage>,
     pub(super) pending_steers: VecDeque<UserMessage>,
     pub(super) pending_steer_history_records: VecDeque<UserMessageHistoryRecord>,
