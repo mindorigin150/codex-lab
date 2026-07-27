@@ -3592,6 +3592,7 @@ allow_local_binding = true
                 pattern: format!("{}/**/*.env", test.config.cwd.as_path().display()),
             },
             access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         });
     assert!(
         file_system_sandbox_policy.has_denied_read_restrictions(),

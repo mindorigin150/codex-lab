@@ -211,7 +211,9 @@ class InstallCodexLabShTest(unittest.TestCase):
     def test_explicit_bwrap_overrides_official_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            explicit_bwrap = write_fake_bwrap(root / "explicit-bwrap", marker="explicit")
+            explicit_bwrap = write_fake_bwrap(
+                root / "explicit-bwrap", marker="explicit"
+            )
             official_bwrap = (
                 root
                 / ".codex"

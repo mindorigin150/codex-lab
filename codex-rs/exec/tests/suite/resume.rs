@@ -493,8 +493,12 @@ async fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<(
 
     let test = test_codex_exec();
     let server = MockServer::start().await;
-    let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
+    let response_mock = mount_exec_responses(&server, /*count*/ 2).await;
     let repo_root = exec_repo_root()?;
+    let mock_provider = format!(
+        "model_providers.mock_provider={{name=\"Mock provider for test\",base_url=\"{}/v1\",wire_api=\"responses\",requires_openai_auth=false,supports_websockets=false}}",
+        server.uri()
+    );
 
     let marker = format!("resume-config-{}", Uuid::new_v4());
     let prompt = format!("echo {marker}");
@@ -505,6 +509,9 @@ async fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<(
         .arg("workspace-write")
         .arg("--model")
         .arg("gpt-5.1")
+        .arg("-c")
+        .arg(&mock_provider)
+        .args(["-c", "model_provider=\"mock_provider\""])
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt)
@@ -525,6 +532,9 @@ async fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<(
         .arg("workspace-write")
         .arg("--model")
         .arg("gpt-5.1-high")
+        .arg("-c")
+        .arg(&mock_provider)
+        .args(["-c", "model_provider=\"mock_provider\""])
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt2)
@@ -534,6 +544,14 @@ async fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<(
         .context("resume run should succeed")?;
 
     assert!(output.status.success(), "resume run failed: {output:?}");
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].body_json()["model"],
+        serde_json::json!("gpt-5.1-high"),
+        "resumed request should use the CLI model override"
+    );
 
     let stderr = String::from_utf8(output.stderr)?;
     assert!(

@@ -34,6 +34,7 @@ SELECT
     threads.tokens_used,
     threads.first_user_message,
     threads.archived_at,
+    threads.is_pinned,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url
@@ -373,6 +374,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
                 allowed_sources,
                 model_providers,
                 cwd_filters: None,
+                is_pinned: None,
                 anchor: None,
                 sort_key: crate::SortKey::UpdatedAt,
                 sort_direction: SortDirection::Desc,
@@ -497,6 +499,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
                 allowed_sources,
                 model_providers,
                 cwd_filters: None,
+                is_pinned: None,
                 anchor,
                 sort_key,
                 sort_direction: SortDirection::Desc,
@@ -567,11 +570,12 @@ INSERT INTO threads (
     first_user_message,
     archived,
     archived_at,
+    is_pinned,
     git_sha,
     git_branch,
     git_origin_url,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -620,6 +624,7 @@ ON CONFLICT(id) DO NOTHING
         .bind(metadata.first_user_message.as_deref().unwrap_or_default())
         .bind(metadata.archived_at.is_some())
         .bind(metadata.archived_at.map(datetime_to_epoch_seconds))
+        .bind(metadata.is_pinned)
         .bind(metadata.git_sha.as_deref())
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
@@ -664,6 +669,20 @@ ON CONFLICT(id) DO NOTHING
     ) -> anyhow::Result<bool> {
         let result = sqlx::query("UPDATE threads SET name = ? WHERE id = ?")
             .bind(name)
+            .bind(thread_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Update the SQLite-owned pinned state without changing other thread metadata.
+    pub async fn update_thread_pin(
+        &self,
+        thread_id: ThreadId,
+        is_pinned: bool,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query("UPDATE threads SET is_pinned = ? WHERE id = ?")
+            .bind(is_pinned)
             .bind(thread_id.to_string())
             .execute(self.pool.as_ref())
             .await?;
@@ -844,11 +863,12 @@ INSERT INTO threads (
     first_user_message,
     archived,
     archived_at,
+    is_pinned,
     git_sha,
     git_branch,
     git_origin_url,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -927,6 +947,7 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(metadata.first_user_message.as_deref().unwrap_or_default())
         .bind(metadata.archived_at.is_some())
         .bind(metadata.archived_at.map(datetime_to_epoch_seconds))
+        .bind(metadata.is_pinned)
         .bind(metadata.git_sha.as_deref())
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
@@ -1209,6 +1230,7 @@ SELECT
     threads.tokens_used,
     threads.first_user_message,
     threads.archived_at,
+    threads.is_pinned,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url
@@ -1241,6 +1263,7 @@ pub struct ThreadFilterOptions<'a> {
     pub allowed_sources: &'a [String],
     pub model_providers: Option<&'a [String]>,
     pub cwd_filters: Option<&'a [PathBuf]>,
+    pub is_pinned: Option<bool>,
     pub anchor: Option<&'a crate::Anchor>,
     pub sort_key: SortKey,
     pub sort_direction: SortDirection,
@@ -1257,6 +1280,7 @@ pub(super) fn push_thread_filters<'a>(
         allowed_sources,
         model_providers,
         cwd_filters,
+        is_pinned,
         anchor,
         sort_key,
         sort_direction,
@@ -1269,6 +1293,10 @@ pub(super) fn push_thread_filters<'a>(
         builder.push(" AND threads.archived = 0");
     }
     builder.push(" AND threads.preview <> ''");
+    if let Some(is_pinned) = is_pinned {
+        builder.push(" AND threads.is_pinned = ");
+        builder.push_bind(is_pinned);
+    }
     if !allowed_sources.is_empty() {
         builder.push(" AND threads.source IN (");
         let mut separated = builder.separated(", ");
@@ -1412,15 +1440,19 @@ mod tests {
     use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::ThreadHistoryMode;
+    use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
     #[tokio::test]
     async fn upsert_thread_keeps_creation_memory_mode_for_existing_rows() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000123").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -1456,9 +1488,12 @@ mod tests {
     #[tokio::test]
     async fn collaboration_mode_round_trips_and_legacy_null_is_preserved() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000124").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -1519,9 +1554,12 @@ mod tests {
     #[tokio::test]
     async fn thread_metadata_round_trips_history_mode() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000124").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -1541,9 +1579,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_pin_updates_round_trip_and_survive_rollout_reconciliation() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let thread_id = ThreadId::new();
+        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("thread insert should succeed");
+        assert!(
+            !runtime
+                .get_thread(thread_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_pinned
+        );
+
+        assert!(
+            runtime
+                .update_thread_pin(thread_id, /*is_pinned*/ true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_pinned
+        );
+
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("stale rollout metadata should reconcile");
+        assert!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_pinned
+        );
+
+        assert!(
+            runtime
+                .update_thread_pin(thread_id, /*is_pinned*/ false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !runtime
+                .get_thread(thread_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_pinned
+        );
+        assert!(
+            !runtime
+                .update_thread_pin(ThreadId::new(), /*is_pinned*/ true)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_filters_pins_before_recency_pagination_and_uses_index() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let oldest_pinned = ThreadId::from_string("00000000-0000-0000-0000-000000000041").unwrap();
+        let newest_unpinned =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000042").unwrap();
+        let newest_pinned = ThreadId::from_string("00000000-0000-0000-0000-000000000043").unwrap();
+        let oldest_unpinned =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000044").unwrap();
+
+        for (thread_id, recency_at, is_pinned) in [
+            (oldest_pinned, 1_700_000_001, true),
+            (newest_unpinned, 1_700_000_003, false),
+            (newest_pinned, 1_700_000_002, true),
+            (oldest_unpinned, 1_700_000_000, false),
+        ] {
+            let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+            metadata.recency_at = DateTime::<Utc>::from_timestamp(recency_at, 0).unwrap();
+            metadata.is_pinned = is_pinned;
+            runtime.upsert_thread(&metadata).await.unwrap();
+        }
+
+        let filters = |anchor, is_pinned| ThreadFilterOptions {
+            archived_only: false,
+            allowed_sources: &[],
+            model_providers: None,
+            cwd_filters: None,
+            is_pinned: Some(is_pinned),
+            anchor,
+            sort_key: SortKey::RecencyAt,
+            sort_direction: SortDirection::Desc,
+            search_term: None,
+        };
+        let first_page = runtime
+            .list_threads(/*page_size*/ 1, filters(None, true))
+            .await
+            .unwrap();
+        assert_eq!(first_page.items.len(), 1);
+        assert_eq!(first_page.items[0].id, newest_pinned);
+        assert!(first_page.items[0].is_pinned);
+        let second_page = runtime
+            .list_threads(
+                /*page_size*/ 1,
+                filters(first_page.next_anchor.as_ref(), true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_page.items.len(), 1);
+        assert_eq!(second_page.items[0].id, oldest_pinned);
+        assert_eq!(second_page.next_anchor, None);
+
+        let unpinned_page = runtime
+            .list_threads(/*page_size*/ 10, filters(None, false))
+            .await
+            .unwrap();
+        assert_eq!(
+            unpinned_page
+                .items
+                .iter()
+                .map(|thread| thread.id)
+                .collect::<Vec<_>>(),
+            vec![newest_unpinned, oldest_unpinned]
+        );
+
+        let mut builder = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
+        push_list_threads_query(
+            &mut builder,
+            filters(None, true),
+            /*relation_filter*/ None,
+            /*limit*/ 2,
+        );
+        let plan_details = builder
+            .build()
+            .fetch_all(runtime.pool.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>();
+        assert!(
+            plan_details
+                .iter()
+                .any(|detail| detail.contains("idx_threads_pinned_recency_at_ms")),
+            "pinned listing did not use its selective recency index: {plan_details:?}"
+        );
+        assert!(
+            !plan_details
+                .iter()
+                .any(|detail| detail.contains("TEMP B-TREE")),
+            "pinned listing unexpectedly sorted outside its index: {plan_details:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_thread_cleans_associated_state() -> Result<()> {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await?;
         let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000401")?;
         let child_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000402")?;
         runtime
@@ -1589,7 +1804,11 @@ mod tests {
     #[tokio::test]
     async fn delete_thread_keeps_retry_graph_on_cleanup_failure() -> Result<()> {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await?;
         let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000405")?;
         let child_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000406")?;
         runtime
@@ -1672,9 +1891,12 @@ mod tests {
     #[tokio::test]
     async fn list_threads_updated_after_returns_oldest_changes_first() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let older_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid thread id");
         let middle_id =
@@ -1713,6 +1935,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: Some(&model_providers),
                     cwd_filters: None,
+                    is_pinned: None,
                     anchor: Some(&anchor),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Asc,
@@ -1741,6 +1964,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: Some(&model_providers),
                     cwd_filters: None,
+                    is_pinned: None,
                     anchor: page.next_anchor.as_ref(),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Asc,
@@ -1758,9 +1982,12 @@ mod tests {
     #[tokio::test]
     async fn list_threads_filters_by_cwd() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let first_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000101").expect("valid thread id");
         let second_id =
@@ -1794,6 +2021,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: Some(cwd_filters.as_slice()),
+                    is_pinned: None,
                     anchor: None,
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -1826,6 +2054,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: Some(cwd_filters.as_slice()),
+                    is_pinned: None,
                     anchor: first_page.next_anchor.as_ref(),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -1851,6 +2080,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: Some(&[]),
+                    is_pinned: None,
                     anchor: None,
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -1866,9 +2096,12 @@ mod tests {
     #[tokio::test]
     async fn list_threads_uses_indexes_matching_cwd_filters() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
 
         let model_providers = ["test-provider".to_string()];
         let cwd_filters = [
@@ -1915,6 +2148,7 @@ mod tests {
                         allowed_sources: &[],
                         model_providers: Some(&model_providers),
                         cwd_filters,
+                        is_pinned: None,
                         anchor,
                         sort_key,
                         sort_direction: SortDirection::Desc,
@@ -1952,9 +2186,12 @@ mod tests {
     #[tokio::test]
     async fn list_threads_by_relation_filters_spawn_graph_with_keyset_pagination() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let parent_id = ThreadId::new();
         let first_child_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid thread id");
@@ -2008,6 +2245,7 @@ mod tests {
                 allowed_sources: &[],
                 model_providers: None,
                 cwd_filters: None,
+                is_pinned: None,
                 anchor: None,
                 sort_key: SortKey::CreatedAt,
                 sort_direction: SortDirection::Desc,
@@ -2036,6 +2274,7 @@ mod tests {
             allowed_sources: &[],
             model_providers: None,
             cwd_filters: None,
+            is_pinned: None,
             anchor,
             sort_key: SortKey::CreatedAt,
             sort_direction: SortDirection::Desc,
@@ -2146,9 +2385,12 @@ mod tests {
     #[tokio::test]
     async fn apply_rollout_items_restores_memory_mode_from_session_meta() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000456").expect("valid thread id");
         let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2212,9 +2454,12 @@ mod tests {
     #[tokio::test]
     async fn apply_rollout_items_preserves_existing_git_branch_and_fills_missing_git_fields() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000457").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2290,9 +2535,12 @@ mod tests {
     #[tokio::test]
     async fn upsert_thread_preserves_existing_git_fields_atomically() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000458").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2331,9 +2579,12 @@ mod tests {
     #[tokio::test]
     async fn upsert_thread_preserves_existing_preview_when_incoming_preview_is_empty() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000459").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2364,9 +2615,12 @@ mod tests {
     #[tokio::test]
     async fn set_thread_preview_if_empty_only_fills_blank_preview() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000460").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2405,9 +2659,12 @@ mod tests {
     #[tokio::test]
     async fn update_thread_git_info_preserves_newer_non_git_metadata() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000789").expect("valid thread id");
         let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2467,9 +2724,12 @@ mod tests {
     #[tokio::test]
     async fn insert_thread_if_absent_preserves_existing_metadata() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000791").expect("valid thread id");
 
@@ -2515,9 +2775,12 @@ mod tests {
     #[tokio::test]
     async fn update_thread_git_info_can_clear_fields() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000790").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2549,9 +2812,12 @@ mod tests {
     #[tokio::test]
     async fn touch_thread_updated_at_updates_only_updated_at() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000791").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2588,9 +2854,12 @@ mod tests {
     #[tokio::test]
     async fn touch_thread_recency_at_is_monotonic_and_survives_stale_upsert() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000792").expect("valid thread id");
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2647,9 +2916,12 @@ mod tests {
     #[tokio::test]
     async fn list_threads_orders_and_pages_by_recency_at() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let first_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000793").expect("valid thread id");
         let second_id =
@@ -2682,6 +2954,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: None,
+                    is_pinned: None,
                     anchor: None,
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,
@@ -2714,6 +2987,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: None,
+                    is_pinned: None,
                     anchor: first_page.next_anchor.as_ref(),
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,
@@ -2746,6 +3020,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: None,
+                    is_pinned: None,
                     anchor: second_page.next_anchor.as_ref(),
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,
@@ -2768,9 +3043,12 @@ mod tests {
     #[tokio::test]
     async fn thread_updated_at_uses_unique_epoch_millis_and_reads_legacy_seconds() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let first_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000901").expect("valid thread id");
         let second_id =
@@ -2876,9 +3154,12 @@ mod tests {
     #[tokio::test]
     async fn apply_rollout_items_uses_override_updated_at_when_provided() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000792").expect("valid thread id");
         let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
@@ -2936,9 +3217,12 @@ mod tests {
     #[tokio::test]
     async fn thread_spawn_edges_track_directional_status() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let parent_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000900").expect("valid thread id");
         let child_thread_id =
@@ -3032,9 +3316,12 @@ mod tests {
     #[tokio::test]
     async fn thread_spawn_children_without_status_filter_lists_all_statuses() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
-            .await
-            .expect("state db should initialize");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
         let parent_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000910").expect("valid thread id");
         let open_child_thread_id =

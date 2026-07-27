@@ -22,6 +22,7 @@ fn resume_parses_prompt_after_global_flags() {
     assert!(cli.ephemeral);
     assert!(cli.ignore_user_config);
     assert!(cli.ignore_rules);
+    assert_eq!(cli.shared.model.as_deref(), Some("gpt-5.2-codex"));
     let Some(Command::Resume(args)) = cli.command else {
         panic!("expected resume command");
     };
@@ -33,6 +34,21 @@ fn resume_parses_prompt_after_global_flags() {
         }
     });
     assert_eq!(effective_prompt.as_deref(), Some(PROMPT));
+}
+
+#[test]
+fn resume_preserves_global_model_before_subcommand() {
+    let cli = Cli::parse_from([
+        "codex-exec",
+        "--model",
+        "gpt-5.1-high",
+        "echo resumed",
+        "resume",
+        "--last",
+    ]);
+
+    assert_eq!(cli.shared.model.as_deref(), Some("gpt-5.1-high"));
+    assert!(matches!(cli.command, Some(Command::Resume(_))));
 }
 
 #[test]

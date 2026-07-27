@@ -142,6 +142,7 @@ mod tests {
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
+            is_pinned: false,
             history_mode: Default::default(),
             collaboration_mode: None,
             model_provider: "openai".to_string(),

@@ -1,3 +1,4 @@
+use crate::StartThreadOptions;
 use crate::ThreadManager;
 use crate::agent::AgentControl;
 use crate::codex_thread::CodexThread;
@@ -7,7 +8,7 @@ use crate::thread_manager::ThreadManagerState;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::ThreadId;
-use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -34,7 +35,7 @@ async fn batch_residency_reservation_is_all_or_nothing() {
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
     );
     manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start root thread");
     let control = manager.agent_control();
@@ -44,10 +45,10 @@ async fn batch_residency_reservation_is_all_or_nothing() {
         .await
         .err()
         .expect("two-task batch must not fit one residency slot");
-    assert!(
-        matches!(err, CodexErr::AgentLimitReached { max_threads: 1 }),
-        "unexpected batch reservation error: {err:?}"
-    );
+    let CodexErrorDetails::AgentLimitReached { max_threads } = err.details() else {
+        panic!("unexpected batch reservation error: {err:?}");
+    };
+    assert_eq!(*max_threads, 1);
 
     // The failed batch must release the first pending slot.
     let slots = control
@@ -72,7 +73,7 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
     );
     let root = manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start root thread");
     let control = manager.agent_control();
@@ -92,8 +93,10 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
         .await
         .expect("second resident slot should evict the first idle agent");
     match manager.get_thread(first.thread_id).await {
-        Err(CodexErr::ThreadNotFound(thread_id)) => assert_eq!(thread_id, first.thread_id),
-        Err(err) => panic!("expected evicted thread to be missing, got {err:?}"),
+        Err(err) => match err.details() {
+            CodexErrorDetails::ThreadNotFound(thread_id) => assert_eq!(*thread_id, first.thread_id),
+            _ => panic!("expected evicted thread to be missing, got {err:?}"),
+        },
         Ok(_) => panic!("expected evicted thread to be missing"),
     }
     let second = spawn_v2_subagent(&control, &state, config, root.thread_id, "worker-2").await;
@@ -118,7 +121,7 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
     );
     let root = manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start root thread");
     let control = manager.agent_control();
@@ -138,8 +141,10 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
         .await
         .expect("second resident slot should evict the first interrupted idle agent");
     match manager.get_thread(first.thread_id).await {
-        Err(CodexErr::ThreadNotFound(thread_id)) => assert_eq!(thread_id, first.thread_id),
-        Err(err) => panic!("expected evicted thread to be missing, got {err:?}"),
+        Err(err) => match err.details() {
+            CodexErrorDetails::ThreadNotFound(thread_id) => assert_eq!(*thread_id, first.thread_id),
+            _ => panic!("expected evicted thread to be missing, got {err:?}"),
+        },
         Ok(_) => panic!("expected evicted thread to be missing"),
     }
     let second =
@@ -151,16 +156,18 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
         .ensure_v2_agent_loaded(config, first.thread_id)
         .await
         .expect_err("evicted interrupted agent should stay lost");
-    match err {
-        CodexErr::ThreadNotFound(thread_id) => assert_eq!(thread_id, first.thread_id),
-        err => panic!("expected ThreadNotFound, got {err:?}"),
+    match err.details() {
+        CodexErrorDetails::ThreadNotFound(thread_id) => assert_eq!(*thread_id, first.thread_id),
+        _ => panic!("expected ThreadNotFound, got {err:?}"),
     }
 
     assert!(manager.get_thread(root.thread_id).await.is_ok());
     assert!(manager.get_thread(second.thread_id).await.is_ok());
     match manager.get_thread(first.thread_id).await {
-        Err(CodexErr::ThreadNotFound(thread_id)) => assert_eq!(thread_id, first.thread_id),
-        Err(err) => panic!("expected evicted thread to be missing, got {err:?}"),
+        Err(err) => match err.details() {
+            CodexErrorDetails::ThreadNotFound(thread_id) => assert_eq!(*thread_id, first.thread_id),
+            _ => panic!("expected evicted thread to be missing, got {err:?}"),
+        },
         Ok(_) => panic!("expected evicted thread to be missing"),
     }
 }

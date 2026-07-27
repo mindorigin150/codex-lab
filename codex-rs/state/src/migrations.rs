@@ -91,7 +91,8 @@ async fn repair_legacy_state_migration_versions_on_connection(
         return Ok(());
     }
 
-    for (legacy_version, current_version) in [(38_i64, 39_i64), (41_i64, 43_i64)] {
+    for (legacy_version, current_version) in [(38_i64, 39_i64), (41_i64, 45_i64), (43_i64, 45_i64)]
+    {
         let Some(current_migration) = migrator
             .migrations
             .iter()

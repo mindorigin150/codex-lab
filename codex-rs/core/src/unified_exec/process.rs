@@ -87,6 +87,18 @@ struct LocalOutputTaskHandles {
     output_artifact: Option<OutputArtifactSpool>,
 }
 
+struct OutputTaskGuard {
+    output_closed: Arc<AtomicBool>,
+    output_closed_notify: Arc<Notify>,
+}
+
+impl Drop for OutputTaskGuard {
+    fn drop(&mut self) {
+        self.output_closed.store(true, Ordering::Release);
+        self.output_closed_notify.notify_waiters();
+    }
+}
+
 /// Transport-specific process handle used by unified exec.
 enum ProcessHandle {
     Local(Box<ExecCommandSession>),
@@ -239,8 +251,6 @@ impl UnifiedExecProcess {
     }
 
     fn finish_termination(&self) {
-        self.output_closed.store(true, Ordering::Release);
-        self.output_closed_notify.notify_waiters();
         self.cancellation_token.cancel();
         if let Some(output_task) = &self.output_task {
             output_task.abort();
@@ -482,6 +492,10 @@ impl UnifiedExecProcess {
         let process = started.process;
         let mut events = process.subscribe_events();
         tokio::spawn(async move {
+            let _output_task_guard = OutputTaskGuard {
+                output_closed: Arc::clone(&output_closed),
+                output_closed_notify: Arc::clone(&output_closed_notify),
+            };
             let mut last_seq: u64 = 0;
             loop {
                 let event = match events.recv().await {
@@ -643,6 +657,10 @@ impl UnifiedExecProcess {
                 output_tx,
                 mut output_artifact,
             } = handles;
+            let _output_task_guard = OutputTaskGuard {
+                output_closed: Arc::clone(&output_closed),
+                output_closed_notify: Arc::clone(&output_closed_notify),
+            };
             let mut stdout_open = true;
             let mut stderr_open = true;
             loop {

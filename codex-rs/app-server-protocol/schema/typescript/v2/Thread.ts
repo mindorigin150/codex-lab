@@ -28,6 +28,9 @@ preview: string, /**
  * Whether the thread is ephemeral and should not be materialized on disk.
  */
 ephemeral: boolean, /**
+ * Whether the thread has been pinned by the user.
+ */
+isPinned: boolean, /**
  * Last selected collaboration mode, when persisted or currently loaded.
  */
 collaborationMode: CollaborationMode | null, /**

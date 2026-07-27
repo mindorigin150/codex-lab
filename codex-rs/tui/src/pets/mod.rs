@@ -257,6 +257,7 @@ mod tests {
 
     use super::image_protocol::ImageProtocol;
     use super::*;
+    use base64::Engine as _;
 
     #[test]
     fn ambient_pet_image_restores_cursor_after_drawing() {
@@ -324,6 +325,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let frame = dir.path().join("frame.png");
         std::fs::write(&frame, b"png").unwrap();
+        let canonical_frame = frame.canonicalize().unwrap();
+        let encoded_frame = base64::engine::general_purpose::STANDARD
+            .encode(canonical_frame.to_string_lossy().as_bytes());
         let request = AmbientPetDraw {
             frame,
             protocol: ImageProtocol::KittyLocalFile,
@@ -344,7 +348,7 @@ mod tests {
         assert!(output.contains("a=d,d=I,i=49374,q=2;"));
         assert!(output.contains("\x1b[4;3H"));
         assert!(output.contains("a=T,t=f,f=100,c=4,r=2,q=2,i=49374;"));
-        assert!(!output.contains("cG5n"));
+        assert!(output.contains(&encoded_frame));
         assert!(output.contains("\x1b8"));
     }
 

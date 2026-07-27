@@ -335,6 +335,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         parent_thread_id: None,
         preview: String::new(),
         ephemeral: false,
+        is_pinned: false,
         history_mode: Default::default(),
         collaboration_mode: None,
         model_provider: "openai".to_string(),
@@ -397,13 +398,13 @@ fn turn_items_for_thread_returns_matching_turn_items() {
 }
 
 #[test]
-fn should_backfill_turn_completed_items_skips_ephemeral_threads() {
+fn should_backfill_turn_completed_items_backfills_persisted_summaries_only() {
     let notification =
         ServerNotification::TurnCompleted(codex_app_server_protocol::TurnCompletedNotification {
             thread_id: "thread-1".to_string(),
             turn: codex_app_server_protocol::Turn {
                 id: "turn-1".to_string(),
-                items_view: codex_app_server_protocol::TurnItemsView::Full,
+                items_view: codex_app_server_protocol::TurnItemsView::Summary,
                 items: Vec::new(),
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,
@@ -415,6 +416,10 @@ fn should_backfill_turn_completed_items_skips_ephemeral_threads() {
 
     assert!(!should_backfill_turn_completed_items(
         /*thread_ephemeral*/ true,
+        &notification
+    ));
+    assert!(should_backfill_turn_completed_items(
+        /*thread_ephemeral*/ false,
         &notification
     ));
 }
@@ -799,6 +804,7 @@ fn sample_thread_start_response() -> ThreadStartResponse {
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
+            is_pinned: false,
             history_mode: Default::default(),
             collaboration_mode: None,
             model_provider: "openai".to_string(),

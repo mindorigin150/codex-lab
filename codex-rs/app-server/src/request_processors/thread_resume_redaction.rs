@@ -194,6 +194,7 @@ mod tests {
             parent_thread_id: None,
             preview: "preview".to_string(),
             ephemeral: false,
+            is_pinned: false,
             history_mode: Default::default(),
             collaboration_mode: None,
             model_provider: "mock_provider".to_string(),

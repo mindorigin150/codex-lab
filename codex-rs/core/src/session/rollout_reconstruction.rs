@@ -560,6 +560,7 @@ mod rollback_activity_tests {
                 operation: Some(SubAgentActivityOperation::Followup),
                 generation: Some(generation),
             }),
+            started_at_ms: None,
             completed_at_ms: 0,
         }))
     }

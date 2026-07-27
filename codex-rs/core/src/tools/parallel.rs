@@ -29,6 +29,7 @@ use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolCall;
 use crate::tools::router::ToolCallSource;
 use crate::tools::router::ToolRouter;
+use crate::tools::spec_plan::effective_tool_namespace;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
 
@@ -102,13 +103,15 @@ impl ToolCallRuntime {
         source: ToolCallSource,
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<AnyToolResult, FunctionCallError>> {
-        let collaboration_namespace = self
-            .step_context
-            .turn
-            .config
-            .multi_agent_v2
-            .tool_namespace
-            .as_deref();
+        let collaboration_namespace = effective_tool_namespace(
+            self.step_context
+                .turn
+                .config
+                .multi_agent_v2
+                .tool_namespace
+                .as_deref(),
+            self.step_context.turn.provider.capabilities(),
+        );
         let is_collaboration_call = is_collaboration_call(&call, collaboration_namespace);
         let mut blocking_spawn_registration = is_blocking_spawn(&call, collaboration_namespace)
             .then(|| self.blocking_spawn_gate.register());
@@ -437,6 +440,28 @@ mod tests {
                 "nested code-mode calls should not create overlapping timing events"
             );
         });
+    }
+
+    #[test]
+    fn collaboration_gate_uses_plain_tools_when_provider_lacks_namespaces() {
+        let collaboration_namespace = effective_tool_namespace(
+            Some("agents"),
+            codex_model_provider::ProviderCapabilities {
+                namespace_tools: false,
+                ..Default::default()
+            },
+        );
+        let call = ToolCall {
+            tool_name: codex_tools::ToolName::plain("spawn_agent"),
+            call_id: "call-spawn".to_string(),
+            payload: ToolPayload::Function {
+                arguments: serde_json::json!({ "agent_type": "explorer" }).to_string(),
+            },
+        };
+
+        assert_eq!(collaboration_namespace, None);
+        assert!(is_collaboration_call(&call, collaboration_namespace));
+        assert!(is_blocking_spawn(&call, collaboration_namespace));
     }
 
     #[tokio::test]

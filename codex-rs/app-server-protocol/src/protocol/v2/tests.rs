@@ -217,6 +217,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
+            is_pinned: true,
             history_mode: Default::default(),
             collaboration_mode: None,
             model_provider: "openai".to_string(),
@@ -258,6 +259,17 @@ fn thread_resume_response_round_trips_initial_turns_page() {
     };
 
     let value = serde_json::to_value(&response).expect("serialize thread resume response");
+    assert_eq!(value["thread"]["isPinned"], json!(true));
+
+    let mut legacy_thread = value["thread"].clone();
+    legacy_thread
+        .as_object_mut()
+        .expect("serialized thread should be an object")
+        .remove("isPinned");
+    let legacy_thread =
+        serde_json::from_value::<Thread>(legacy_thread).expect("deserialize legacy thread");
+    assert!(!legacy_thread.is_pinned);
+
     assert_eq!(
         value.get("initialTurnsPage"),
         Some(&json!({
@@ -387,6 +399,42 @@ fn thread_list_params_accepts_state_db_only_flag() {
     .expect("state db only flag should deserialize");
 
     assert!(params.use_state_db_only);
+}
+
+#[test]
+fn thread_list_params_accepts_pinned_filter() {
+    for is_pinned in [true, false] {
+        let params = serde_json::from_value::<ThreadListParams>(json!({
+            "isPinned": is_pinned,
+        }))
+        .expect("pinned filter should deserialize");
+
+        assert_eq!(params.is_pinned, Some(is_pinned));
+    }
+
+    let params = serde_json::from_value::<ThreadListParams>(json!({}))
+        .expect("omitted pinned filter should deserialize");
+    assert_eq!(params.is_pinned, None);
+}
+
+#[test]
+fn thread_metadata_update_params_accepts_pinned_patch() {
+    for is_pinned in [true, false] {
+        let params = serde_json::from_value::<ThreadMetadataUpdateParams>(json!({
+            "threadId": "thr_123",
+            "isPinned": is_pinned,
+        }))
+        .expect("pinned metadata patch should deserialize");
+
+        assert_eq!(params.is_pinned, Some(is_pinned));
+        assert_eq!(params.git_info, None);
+    }
+
+    let params = serde_json::from_value::<ThreadMetadataUpdateParams>(json!({
+        "threadId": "thr_123",
+    }))
+    .expect("omitted pinned metadata patch should deserialize");
+    assert_eq!(params.is_pinned, None);
 }
 
 #[test]
@@ -624,12 +672,14 @@ fn additional_file_system_permissions_preserves_canonical_entries() {
                     value: CoreFileSystemSpecialPath::Root,
                 },
                 access: CoreFileSystemAccessMode::Write,
+                missing_path_behavior: None,
             },
             CoreFileSystemSandboxEntry {
                 path: CoreFileSystemPath::GlobPattern {
                     pattern: "**/*.env".to_string(),
                 },
                 access: CoreFileSystemAccessMode::Deny,
+                missing_path_behavior: None,
             },
         ],
         glob_scan_max_depth: NonZeroUsize::new(2),
@@ -1835,14 +1885,50 @@ fn config_requirements_granular_allowed_approval_policy_is_marked_experimental()
             allow_appshots: None,
             allow_remote_control: None,
             computer_use: None,
+            browser_use: None,
             feature_requirements: None,
             hooks: None,
             enforce_residency: None,
             network: None,
             models: None,
+            sqlite_home: None,
+            log_dir: None,
+            model_catalog_json: None,
+            check_for_update_on_startup: None,
+            allow_login_shell: None,
+            feedback: None,
+            windows_sandbox_private_desktop: None,
         });
 
     assert_eq!(reason, Some("askForApproval.granular"));
+}
+
+#[test]
+fn config_requirements_read_accepts_foreign_path_uris() {
+    let response: ConfigRequirementsReadResponse = serde_json::from_value(json!({
+        "requirements": {
+            "sqliteHome": "file:///C:/Users/alice/.codex/state",
+            "logDir": "file:///C:/Users/alice/.codex/logs",
+            "modelCatalogJson": "file:///C:/Users/alice/.codex/models.json"
+        }
+    }))
+    .expect("requirements response with foreign paths should deserialize");
+    let requirements = response
+        .requirements
+        .expect("requirements should be present");
+
+    assert_eq!(
+        requirements.sqlite_home,
+        Some(PathUri::parse("file:///C:/Users/alice/.codex/state").expect("valid URI"))
+    );
+    assert_eq!(
+        requirements.log_dir,
+        Some(PathUri::parse("file:///C:/Users/alice/.codex/logs").expect("valid URI"))
+    );
+    assert_eq!(
+        requirements.model_catalog_json,
+        Some(PathUri::parse("file:///C:/Users/alice/.codex/models.json").expect("valid URI"))
+    );
 }
 
 #[test]
@@ -2708,6 +2794,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
 
     let command_item = TurnItem::CommandExecution(CommandExecutionItem {
         id: "exec-1".to_string(),
+        plugin_id: Some("sample@openai-curated".to_string()),
+        script_path: Some("scripts/run.py".to_string()),
         process_id: Some("pid-1".to_string()),
         command: vec!["echo".to_string(), "done".to_string()],
         cwd: PathUri::from_abs_path(&test_path_buf("/tmp").abs()),
@@ -2729,6 +2817,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         ThreadItem::from(command_item),
         ThreadItem::CommandExecution {
             id: "exec-1".to_string(),
+            plugin_id: Some("sample@openai-curated".to_string()),
+            script_path: Some("scripts/run.py".to_string()),
             command: "echo done".to_string(),
             cwd: LegacyAppPathString::from_abs_path(&test_path_buf("/tmp").abs()),
             process_id: Some("pid-1".to_string()),
@@ -3389,6 +3479,22 @@ fn plugin_list_params_ignore_removed_force_remote_sync_field() {
         PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
+        },
+    );
+}
+
+#[test]
+fn plugin_list_params_deserializes_force_refetch() {
+    assert_eq!(
+        serde_json::from_value::<PluginListParams>(json!({
+            "forceRefetch": true,
+        }))
+        .unwrap(),
+        PluginListParams {
+            cwds: None,
+            marketplace_kinds: None,
+            force_refetch: true,
         },
     );
 }
@@ -3405,6 +3511,7 @@ fn plugin_list_params_serializes_marketplace_kind_filter() {
                 PluginListMarketplaceKind::SharedWithMe,
                 PluginListMarketplaceKind::CreatedByMeRemote,
             ]),
+            force_refetch: false,
         })
         .unwrap(),
         json!({
@@ -3629,11 +3736,13 @@ fn plugin_share_params_and_response_serialization_use_camel_case_fields() {
         serde_json::to_value(PluginShareSaveResponse {
             remote_plugin_id: "plugins~Plugin_00000000000000000000000000000000".to_string(),
             share_url: String::new(),
+            can_publish_to_workspace: Some(true),
         })
         .unwrap(),
         json!({
             "remotePluginId": "plugins~Plugin_00000000000000000000000000000000",
             "shareUrl": "",
+            "canPublishToWorkspace": true,
         }),
     );
 
@@ -4442,4 +4551,29 @@ fn realtime_start_omitted_initial_items_remain_none() {
     .expect("params should deserialize");
 
     assert_eq!(params.initial_items, None);
+}
+#[test]
+fn realtime_start_deserializes_client_handoff_channel_prefixes() {
+    let params = serde_json::from_value::<ThreadRealtimeStartParams>(json!({
+        "threadId": "thread_123",
+        "outputModality": "audio",
+        "codexResponseHandoffChannelPrefixes": {
+            "analysis": ["[THINKING]"],
+            "commentary": ["[PROGRESS]", "[UPDATE]"],
+            "final": ["[DONE]"]
+        }
+    }))
+    .expect("params should deserialize");
+
+    assert_eq!(
+        params.codex_response_handoff_channel_prefixes,
+        Some(BTreeMap::from([
+            ("analysis".to_string(), vec!["[THINKING]".to_string()]),
+            (
+                "commentary".to_string(),
+                vec!["[PROGRESS]".to_string(), "[UPDATE]".to_string()],
+            ),
+            ("final".to_string(), vec!["[DONE]".to_string()]),
+        ]))
+    );
 }

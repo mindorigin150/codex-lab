@@ -476,6 +476,21 @@ impl AgentMarkdownCell {
     }
 }
 
+fn normalize_whitespace_only_hyperlink_lines(mut lines: Vec<HyperlinkLine>) -> Vec<HyperlinkLine> {
+    for line in &mut lines {
+        if line
+            .line
+            .spans
+            .iter()
+            .all(|span| span.content.chars().all(char::is_whitespace))
+        {
+            line.line = Line::default().style(line.line.style);
+            line.hyperlinks.clear();
+        }
+    }
+    lines
+}
+
 impl HistoryCell for AgentMarkdownCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         self.display_rich_lines(width)
@@ -658,6 +673,17 @@ fn prefix_rich_formula_lines(lines: Vec<RichHistoryLine>) -> Vec<RichHistoryLine
                 unreachable!("prefixing one history line returned no lines");
             };
             line.text = prefixed;
+            if line.formulas.is_empty()
+                && line
+                    .text
+                    .line
+                    .spans
+                    .iter()
+                    .all(|span| span.content.chars().all(char::is_whitespace))
+            {
+                line.text.line = Line::default().style(line.text.line.style);
+                line.text.hyperlinks.clear();
+            }
             for placement in &mut line.formulas {
                 placement.column += 2;
             }
@@ -698,7 +724,7 @@ impl HistoryCell for StreamingAgentTailCell {
     fn display_hyperlink_lines(&self, _width: u16) -> Vec<HyperlinkLine> {
         // Tail lines are already rendered at the controller's current stream width.
         // Re-wrapping them here can split table borders and produce malformed in-flight rows.
-        let mut lines = prefix_hyperlink_lines(
+        normalize_whitespace_only_hyperlink_lines(prefix_hyperlink_lines(
             self.lines.clone(),
             if self.is_first_line {
                 "• ".dim()
@@ -706,19 +732,7 @@ impl HistoryCell for StreamingAgentTailCell {
                 "  ".into()
             },
             "  ".into(),
-        );
-        for line in &mut lines {
-            if line
-                .line
-                .spans
-                .iter()
-                .all(|span| span.content.chars().all(char::is_whitespace))
-            {
-                line.line = Line::default().style(line.line.style);
-                line.hyperlinks.clear();
-            }
-        }
-        lines
+        ))
     }
 
     fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {

@@ -50,6 +50,7 @@ pub fn normalize_additional_permissions(
                 let normalized_entry = FileSystemSandboxEntry {
                     path,
                     access: entry.access,
+                    missing_path_behavior: entry.missing_path_behavior,
                 };
                 if !entries.contains(&normalized_entry) {
                     entries.push(normalized_entry);
@@ -320,6 +321,7 @@ fn append_intersected_grants(
         let entry = FileSystemSandboxEntry {
             path: candidate.path.clone(),
             access,
+            missing_path_behavior: candidate.missing_path_behavior,
         };
         if !entries.contains(&entry) {
             entries.push(entry);
@@ -577,6 +579,7 @@ fn materialize_cwd_dependent_entry(
             .map(|path| FileSystemSandboxEntry {
                 path: FileSystemPath::Path { path },
                 access: entry.access,
+                missing_path_behavior: entry.missing_path_behavior,
             })
             .unwrap_or_else(|| entry.clone()),
         FileSystemPath::GlobPattern { pattern } => FileSystemSandboxEntry {
@@ -586,6 +589,7 @@ fn materialize_cwd_dependent_entry(
                     .into_owned(),
             },
             access: entry.access,
+            missing_path_behavior: entry.missing_path_behavior,
         },
         FileSystemPath::Path { .. } | FileSystemPath::Special { .. } => entry.clone(),
     }

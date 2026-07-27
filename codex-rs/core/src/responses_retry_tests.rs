@@ -3,6 +3,7 @@ use super::log_retry;
 use super::wait_for_retry_delay;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing_test::internal::MockWriter;
@@ -23,7 +24,10 @@ async fn retry_delay_returns_turn_aborted_when_cancelled() {
     .await
     .expect("retry delay should observe cancellation");
 
-    assert!(matches!(result, Err(CodexErr::TurnAborted)));
+    assert!(matches!(
+        result,
+        Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted)
+    ));
 }
 
 #[tokio::test]
@@ -41,10 +45,7 @@ async fn sampling_retry_logs_stream_error_context() {
     log_retry(
         ResponsesStreamRequest::Sampling,
         &turn_context,
-        &CodexErr::Stream(
-            "websocket closed by server before response.completed".to_string(),
-            None,
-        ),
+        &CodexErr::Stream("websocket closed by server before response.completed".to_string()),
         /*retries*/ 2,
         /*max_retries*/ 5,
         Duration::from_secs(1),

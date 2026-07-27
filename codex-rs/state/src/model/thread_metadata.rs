@@ -127,6 +127,8 @@ pub struct ThreadMetadata {
     pub first_user_message: Option<String>,
     /// The archive timestamp, if the thread is archived.
     pub archived_at: Option<DateTime<Utc>>,
+    /// Whether the thread was explicitly pinned by the user.
+    pub is_pinned: bool,
     /// The git commit SHA, if known.
     pub git_sha: Option<String>,
     /// The git branch name, if known.
@@ -261,6 +263,7 @@ impl ThreadMetadataBuilder {
             tokens_used: 0,
             first_user_message: None,
             archived_at: self.archived_at.map(canonicalize_datetime),
+            is_pinned: false,
             git_sha: self.git_sha.clone(),
             git_branch: self.git_branch.clone(),
             git_origin_url: self.git_origin_url.clone(),
@@ -375,6 +378,9 @@ impl ThreadMetadata {
         if self.archived_at != other.archived_at {
             diffs.push("archived_at");
         }
+        if self.is_pinned != other.is_pinned {
+            diffs.push("is_pinned");
+        }
         if self.git_sha != other.git_sha {
             diffs.push("git_sha");
         }
@@ -419,6 +425,7 @@ pub(crate) struct ThreadRow {
     tokens_used: i64,
     first_user_message: String,
     archived_at: Option<i64>,
+    is_pinned: bool,
     git_sha: Option<String>,
     git_branch: Option<String>,
     git_origin_url: Option<String>,
@@ -452,6 +459,7 @@ impl ThreadRow {
             tokens_used: row.try_get("tokens_used")?,
             first_user_message: row.try_get("first_user_message")?,
             archived_at: row.try_get("archived_at")?,
+            is_pinned: row.try_get("is_pinned")?,
             git_sha: row.try_get("git_sha")?,
             git_branch: row.try_get("git_branch")?,
             git_origin_url: row.try_get("git_origin_url")?,
@@ -489,6 +497,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             tokens_used,
             first_user_message,
             archived_at,
+            is_pinned,
             git_sha,
             git_branch,
             git_origin_url,
@@ -528,6 +537,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             tokens_used,
             first_user_message: (!first_user_message.is_empty()).then_some(first_user_message),
             archived_at: archived_at.map(epoch_seconds_to_datetime).transpose()?,
+            is_pinned,
             git_sha,
             git_branch,
             git_origin_url,
@@ -627,6 +637,7 @@ mod tests {
             tokens_used: 1,
             first_user_message: String::new(),
             archived_at: None,
+            is_pinned: false,
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
@@ -661,6 +672,7 @@ mod tests {
             tokens_used: 1,
             first_user_message: None,
             archived_at: None,
+            is_pinned: false,
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
