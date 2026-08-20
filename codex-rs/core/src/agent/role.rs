@@ -31,6 +31,8 @@ use toml::Value as TomlValue;
 
 /// The role name used when a caller omits `agent_type`.
 pub const DEFAULT_ROLE_NAME: &str = "default";
+pub(crate) const EXPLORER_ROLE_NAME: &str = "explorer";
+pub(crate) const REVIEWER_ROLE_NAME: &str = "reviewer";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
 
 #[derive(Default, Serialize)]
@@ -77,6 +79,10 @@ async fn apply_role_to_config_inner(
     };
     let role_layer_toml = load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
     let role_config = deserialize_config_toml_with_base(role_layer_toml, &config.codex_home)?;
+    let restrict_to_read_only = matches!(
+        role_config.sandbox_mode,
+        Some(codex_protocol::config_types::SandboxMode::ReadOnly)
+    );
     let mut overrides = AgentRoleOverrides {
         developer_instructions: role_config.developer_instructions,
         model: role_config.model,
@@ -118,13 +124,22 @@ async fn apply_role_to_config_inner(
     }
 
     let role_layer_toml = TomlValue::try_from(&overrides)?;
-    if role_layer_toml
+    if !role_layer_toml
         .as_table()
         .is_some_and(toml::map::Map::is_empty)
     {
-        return Ok(());
+        *config = role_overrides::build_next_config(config, role_layer_toml, &overrides)?;
     }
-    *config = role_overrides::build_next_config(config, role_layer_toml, &overrides)?;
+    if restrict_to_read_only {
+        let permission_profile = config
+            .permissions
+            .effective_permission_profile()
+            .intersect_with_read_only()
+            .ok_or_else(|| anyhow!("read-only roles require an enforceable filesystem sandbox"))?;
+        config
+            .permissions
+            .set_permission_profile(permission_profile)?;
+    }
     Ok(())
 }
 
@@ -364,7 +379,7 @@ mod built_in {
                     }
                 ),
                 (
-                    "explorer".to_string(),
+                    EXPLORER_ROLE_NAME.to_string(),
                     AgentRoleConfig {
                         description: Some(r#"Use `explorer` for specific codebase questions.
 Explorers are fast and authoritative.
@@ -374,6 +389,15 @@ Rules:
 - You are encouraged to spawn up multiple explorers in parallel when you have multiple distinct questions to ask about the codebase that can be answered independently. This allows you to get more information faster without waiting for one question to finish before asking the next. While waiting for the explorer results, you can continue working on other local tasks that do not depend on those results. This parallelism is a key advantage of delegation, so use it whenever you have multiple questions to ask.
 - Reuse existing explorers for related questions."#.to_string()),
                         config_file: Some("explorer.toml".to_string().parse().unwrap_or_default()),
+                        nickname_candidates: None,
+                    }
+                ),
+                (
+                    REVIEWER_ROLE_NAME.to_string(),
+                    AgentRoleConfig {
+                        description: Some(r#"Use `reviewer` for read-only review of high-risk changes such as security, concurrency, state consistency, cross-module refactors, or changes produced by multiple workers.
+Return actionable findings with severity and `file:line` evidence. Do not modify files or delegate further work."#.to_string()),
+                        config_file: Some("reviewer.toml".to_string().parse().unwrap_or_default()),
                         nickname_candidates: None,
                     }
                 ),
@@ -418,9 +442,11 @@ Rules:
     /// Resolves a built-in role `config_file` path to embedded content.
     pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
         const EXPLORER: &str = include_str!("builtins/explorer.toml");
+        const REVIEWER: &str = include_str!("builtins/reviewer.toml");
         const AWAITER: &str = include_str!("builtins/awaiter.toml");
         match path.to_str()? {
             "explorer.toml" => Some(EXPLORER),
+            "reviewer.toml" => Some(REVIEWER),
             "awaiter.toml" => Some(AWAITER),
             _ => None,
         }

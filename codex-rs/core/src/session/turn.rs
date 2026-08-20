@@ -134,6 +134,9 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 
+mod blocking_agent_barrier;
+use self::blocking_agent_barrier::enforce_blocking_agent_barrier;
+
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
 /// Takes initial turn input and runs a loop where, at each sampling request,
@@ -157,6 +160,14 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    let initial_user_input = input
+        .iter()
+        .any(|input| matches!(input, TurnInput::UserInput { .. }));
+    if initial_user_input {
+        sess.services
+            .agent_control
+            .acknowledge_barrier_failure(sess.thread_id);
+    }
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
@@ -298,7 +309,15 @@ pub(crate) async fn run_turn(
     // 2. After auto-compact, when model/tool continuation needs to resume before any steer.
 
     let mut next_step_context = Some(first_step_context);
+    let mut bypass_barrier_once = initial_user_input;
     loop {
+        if bypass_barrier_once {
+            bypass_barrier_once = false;
+        } else {
+            // Blocking explorer/reviewer work must settle before the model samples again.
+            // Fresh user input gets one pass through so it can steer the parent immediately.
+            let _ = enforce_blocking_agent_barrier(&sess, &turn_context).await;
+        }
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
@@ -1435,6 +1454,7 @@ async fn run_sampling_request(
             &sess,
             &turn_context,
             ResponsesStreamRequest::Sampling,
+            Some(&cancellation_token),
         )
         .await?;
         turn_context.turn_timing_state.record_sampling_retry();

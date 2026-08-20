@@ -7,6 +7,8 @@ use codex_login::test_support::auth_manager_from_optional_auth;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_skills_extension::HostSkillsService;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
@@ -70,19 +72,37 @@ async fn apply_role_returns_error_for_unknown_role() {
 }
 
 #[tokio::test]
-async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    let before_layers = session_flags_layer_count(&config);
-    config.model = Some("gpt-5.4-mini".to_string());
-    config.model_reasoning_effort = Some(ReasoningEffort::High);
+async fn built_in_analysis_roles_are_read_only_and_preserve_model_settings() {
+    for role_name in [EXPLORER_ROLE_NAME, REVIEWER_ROLE_NAME] {
+        let (_home, mut config) = test_config_with_cli_overrides(vec![(
+            "sandbox_mode".to_string(),
+            TomlValue::String("workspace-write".to_string()),
+        )])
+        .await;
+        let before_layers = session_flags_layer_count(&config);
+        config.model = Some("gpt-5.4-mini".to_string());
+        config.model_reasoning_effort = Some(ReasoningEffort::High);
 
-    apply_role_to_config(&mut config, Some("explorer"))
-        .await
-        .expect("explorer role should apply");
+        apply_role_to_config(&mut config, Some(role_name))
+            .await
+            .expect("built-in analysis role should apply");
 
-    assert_eq!(config.model.as_deref(), Some("gpt-5.4-mini"));
-    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
-    assert_eq!(session_flags_layer_count(&config), before_layers);
+        assert_eq!(config.model.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
+        let profile = config.permissions.effective_permission_profile();
+        assert!(matches!(
+            profile.network_sandbox_policy(),
+            NetworkSandboxPolicy::Restricted
+        ));
+        assert!(
+            profile
+                .file_system_sandbox_policy()
+                .entries
+                .iter()
+                .all(|entry| entry.access == FileSystemAccessMode::Read)
+        );
+        assert_eq!(session_flags_layer_count(&config), before_layers);
+    }
 }
 
 #[tokio::test]

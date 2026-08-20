@@ -1010,6 +1010,9 @@ impl ThreadManager {
             agent_control
                 .restore_v2_agent_metadata(&config, resumed.conversation_id)
                 .await;
+            agent_control
+                .close_v2_descendant_edges(resumed.conversation_id)
+                .await;
         }
         let options = StartThreadOptions {
             initial_history,
@@ -1107,6 +1110,19 @@ impl ThreadManager {
                 .map(|(thread_id, thread)| (*thread_id, Arc::clone(thread)))
                 .collect::<Vec<_>>()
         };
+
+        for (thread_id, thread) in &threads {
+            if thread.multi_agent_version() != Some(MultiAgentVersion::V2)
+                || thread.session_source.parent_thread_id().is_none()
+            {
+                continue;
+            }
+            thread
+                .session
+                .services
+                .agent_control
+                .suppress_current_generation(*thread_id);
+        }
 
         let mut shutdowns = threads
             .into_iter()

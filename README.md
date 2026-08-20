@@ -11,6 +11,53 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ## Quickstart
 
+### Installing Codex Lab
+
+Install the latest precompiled Codex Lab release on Linux, macOS, or Windows
+through a POSIX-compatible shell:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/mindorigin150/codex-lab/main/scripts/install/install-codex-lab.sh | sh
+```
+
+The installer selects the matching Linux musl, macOS, or Windows release
+target, verifies the package SHA-256 checksum, and installs a versioned package
+under `~/.local/lib/codex-lab` with an atomic `codex-lab` launcher update. It
+uses `~/.codex` for shared state by default and leaves the stock `codex`
+command unchanged. Set `CODEX_LAB_RELEASE=VERSION` to install a specific
+`codex-lab-vVERSION` release. Each Lab release is built once per target
+architecture; Linux distributions do not require separate builds.
+
+To build the current checkout instead, clone the repository and opt into the
+source path explicitly:
+
+```shell
+git clone https://github.com/mindorigin150/codex-lab.git
+cd codex-lab
+bash scripts/install/install-codex-lab.sh --source
+```
+
+Use `--binary PATH` to install a locally built matching binary without running
+Cargo. On Linux, source installs can bundle a trusted Bubblewrap binary with
+`--bwrap PATH`.
+
+Codex Lab also carries the Lab delegation behavior on top of the current
+upstream Codex: built-in `explorer` and `reviewer` agents are read-only,
+explorers always start with fresh context, and blocking analysis work is not
+silently abandoned when the parent turn would otherwise finish.
+
+When the selected model reports that it is at capacity, Lab classifies the HTTP,
+SSE, or WebSocket response as a recoverable overload and retries indefinitely
+with bounded backoff until the request succeeds or the user interrupts it. The
+UI keeps the turn active and shows `Reconnecting... overload attempt N` as retry
+detail; it does not convert this recoverable condition into a completed task or
+a final error.
+
+To publish a precompiled Lab release, push a tag such as
+`codex-lab-v0.1.0`. The release workflow builds each supported target once and
+publishes the package archives and checksum manifest consumed by the one-line
+installer.
+
 ### Installing and running Codex CLI
 
 Run the following on Mac or Linux to install Codex CLI:

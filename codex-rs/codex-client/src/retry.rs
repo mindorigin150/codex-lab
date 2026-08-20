@@ -20,6 +20,9 @@ pub struct RetryOn {
 
 impl RetryOn {
     pub fn should_retry(&self, err: &TransportError, attempt: u64, max_attempts: u64) -> bool {
+        if is_server_overloaded(err) {
+            return false;
+        }
         if attempt >= max_attempts {
             return false;
         }
@@ -34,6 +37,29 @@ impl RetryOn {
             _ => false,
         }
     }
+}
+
+fn is_server_overloaded(err: &TransportError) -> bool {
+    let TransportError::Http {
+        status,
+        body: Some(body),
+        ..
+    } = err
+    else {
+        return false;
+    };
+    if *status != http::StatusCode::SERVICE_UNAVAILABLE {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|code| matches!(code, "server_is_overloaded" | "slow_down"))
+        })
 }
 
 pub fn backoff(base: Duration, attempt: u64) -> Duration {

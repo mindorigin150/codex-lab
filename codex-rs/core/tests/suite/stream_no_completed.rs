@@ -13,6 +13,7 @@ use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use std::net::TcpListener;
 use wiremock::MockServer;
@@ -96,6 +97,77 @@ async fn retries_on_early_close() {
         "expected retry after incomplete SSE stream"
     );
 
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retries_on_server_overload_even_when_stream_budget_is_zero() {
+    skip_if_no_network!();
+
+    let overload_sse = responses::sse_failed(
+        "resp_overloaded",
+        "server_is_overloaded",
+        "Selected model is at capacity",
+    );
+    let completed_sse = responses::sse_completed("resp_ok");
+    let (server, _) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: overload_sse,
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: completed_sse,
+        }],
+    ])
+    .await;
+
+    let model_provider = ModelProviderInfo {
+        name: "openai".into(),
+        base_url: Some(format!("{}/v1", server.uri())),
+        env_key: Some("PATH".into()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: Some(0),
+        stream_max_retries: Some(0),
+        stream_idle_timeout_ms: Some(2000),
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+    };
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+        })
+        .build_with_streaming_server(&server)
+        .await
+        .unwrap();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+
+    let reconnect_message = wait_for_event_match(&codex, |event| match event {
+        EventMsg::StreamError(error) => Some(error.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(reconnect_message, "Reconnecting... overload attempt 1");
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    assert_eq!(server.requests().await.len(), 2);
     server.shutdown().await;
 }
 

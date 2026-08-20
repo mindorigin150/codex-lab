@@ -1,0 +1,138 @@
+name: codex-lab-release
+
+on:
+  push:
+    tags:
+      - "codex-lab-v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  CODEX_REPO_ROOT: ${{ github.workspace }}
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install Linux musl build tools
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash .github/scripts/install-musl-build-tools.sh
+
+      - name: Configure Windows MSVC
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build package archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          fi
+          if [[ "$TARGET" == *linux* ]]; then
+            (cd codex-rs && cargo build --target "$TARGET" --release --bin bwrap)
+            bwrap_path="$CARGO_TARGET_DIR/$TARGET/release/bwrap"
+            strip --strip-debug --strip-unneeded "$bwrap_path"
+            CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+            export CODEX_BWRAP_SHA256
+          fi
+          binaries=(codex codex-code-mode-host)
+          if [[ "$TARGET" == *windows* ]]; then
+            binaries+=(codex-command-runner codex-windows-sandbox-setup)
+          fi
+          build_args=()
+          for binary in "${binaries[@]}"; do
+            build_args+=(--bin "$binary")
+          done
+          (cd codex-rs && cargo build --target "$TARGET" --release "${build_args[@]}")
+          entrypoint_dir="$CARGO_TARGET_DIR/$TARGET/release"
+          mkdir -p "dist/$TARGET"
+          bash .github/scripts/build-codex-package-archive.sh \
+            --target "$TARGET" \
+            --bundle primary \
+            --package-version "${GITHUB_REF_NAME#codex-lab-v}" \
+            --entrypoint-dir "$entrypoint_dir" \
+            --archive-dir "dist/$TARGET"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-package-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/codex-package-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: codex-package-*
+          merge-multiple: true
+
+      - name: Create checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -type f -name 'codex-package-*.tar.gz' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  .*/#  #' \
+            > dist/codex-package_SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Codex Lab ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/codex-package-*.tar.gz
+            dist/codex-package_SHA256SUMS
+            scripts/install/install-codex-lab.sh

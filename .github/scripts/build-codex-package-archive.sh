@@ -8,6 +8,7 @@ Usage: build-codex-package-archive.sh \
   --bundle <primary|app-server> \
   --entrypoint-dir <dir> \
   --archive-dir <dir> \
+  [--package-version <version>] \
   [--bwrap-bin <path>] \
   [--code-mode-host-bin <path>] \
   [--rg-bin <path>] \
@@ -23,6 +24,7 @@ target=""
 bundle=""
 entrypoint_dir=""
 archive_dir=""
+package_version=""
 target_suffixed_entrypoint="false"
 resource_args=()
 bwrap_bin_provided="false"
@@ -46,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --archive-dir)
       archive_dir="${2:?--archive-dir requires a value}"
+      shift 2
+      ;;
+    --package-version)
+      package_version="${2:?--package-version requires a value}"
       shift 2
       ;;
     --bwrap-bin)
@@ -191,6 +197,9 @@ python_args=(
   --archive-output "$gzip_archive_path"
   --archive-output "$zstd_archive_path"
 )
+if [[ -n "$package_version" ]]; then
+  python_args+=(--package-version "$package_version")
+fi
 if ((${#resource_args[@]} > 0)); then
   python_args+=("${resource_args[@]}")
 fi

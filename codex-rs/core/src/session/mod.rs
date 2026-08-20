@@ -11,6 +11,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
+use crate::agent::CompletionDeliveryClaim;
 use crate::agent::agent_status_from_event;
 use crate::agent::status::is_final;
 use crate::agent_communication::AgentCommunicationContext;
@@ -1991,17 +1992,55 @@ impl Session {
                 status
             }
         };
-        if !is_final(&status) {
+        if !is_final(&status) && !matches!(status, AgentStatus::Interrupted) {
             return;
         }
 
-        self.forward_child_completion_to_parent(
-            turn_context,
-            *parent_thread_id,
-            child_agent_path,
-            status,
-        )
-        .await;
+        let completion_generation = match self
+            .services
+            .agent_control
+            .claim_completion_delivery(self.thread_id)
+        {
+            CompletionDeliveryClaim::Deliver(generation) => Some(generation),
+            CompletionDeliveryClaim::Suppressed => return,
+            CompletionDeliveryClaim::Untracked => None,
+        };
+        if matches!(status, AgentStatus::Interrupted) {
+            if let Some(generation) = completion_generation {
+                self.services.agent_control.record_completion_delivery(
+                    self.thread_id,
+                    generation,
+                    status,
+                );
+            }
+            return;
+        }
+
+        let delivery = self
+            .forward_child_completion_to_parent(
+                turn_context,
+                *parent_thread_id,
+                child_agent_path,
+                status.clone(),
+            )
+            .await;
+        if let Some(generation) = completion_generation {
+            let receipt_status = match delivery {
+                Ok(()) => status,
+                Err(err) => {
+                    let failed_status = AgentStatus::Errored(format!(
+                        "failed to deliver completion to parent: {err}"
+                    ));
+                    self.agent_status.send_replace(failed_status.clone());
+                    failed_status
+                }
+            };
+            self.services.agent_control.record_completion_delivery(
+                self.thread_id,
+                generation,
+                receipt_status,
+            );
+        }
     }
 
     /// Sends the standard completion envelope from a spawned MultiAgentV2 child to its parent.
@@ -2011,13 +2050,13 @@ impl Session {
         parent_thread_id: ThreadId,
         child_agent_path: &codex_protocol::AgentPath,
         status: AgentStatus,
-    ) {
+    ) -> Result<(), String> {
         let Some(parent_agent_path) = child_agent_path
             .as_str()
             .rsplit_once('/')
             .and_then(|(parent, _)| codex_protocol::AgentPath::try_from(parent).ok())
         else {
-            return;
+            return Err("child agent path has no parent".to_string());
         };
 
         let Some(message) = format_inter_agent_completion_message(
@@ -2025,7 +2064,7 @@ impl Session {
             child_agent_path.clone(),
             &status,
         ) else {
-            return;
+            return Err("terminal status has no completion message".to_string());
         };
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
@@ -2056,7 +2095,7 @@ impl Session {
             .await
         {
             debug!("failed to notify parent thread {parent_thread_id}: {err}");
-            return;
+            return Err(err.to_string());
         }
         if let Some(message) = trace_message {
             self.services
@@ -2071,6 +2110,7 @@ impl Session {
                     },
                 );
         }
+        Ok(())
     }
 
     async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {

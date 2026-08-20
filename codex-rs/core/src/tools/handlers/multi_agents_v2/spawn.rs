@@ -3,6 +3,8 @@ use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
+use crate::agent::role::EXPLORER_ROLE_NAME;
+use crate::agent::role::REVIEWER_ROLE_NAME;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::session::multi_agents::resolve_usage_hints;
@@ -52,13 +54,13 @@ async fn handle_spawn_agent(
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let fork_mode = args.fork_mode()?;
-    let message = message_content(args.message)?;
     let role_name = args
         .agent_type
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
+    let fork_mode = args.fork_mode(role_name)?;
+    let message = message_content(args.message)?;
 
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
@@ -91,8 +93,6 @@ async fn handle_spawn_agent(
         args.service_tier.as_deref(),
     )
     .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
-
     let spawn_source = thread_spawn_source(
         session.thread_id,
         &turn.session_source,
@@ -140,7 +140,18 @@ async fn handle_spawn_agent(
         } else {
             None
         };
-    let spawned_agent = Box::pin(
+    let blocking_role =
+        role_name.is_some_and(|role| matches!(role, EXPLORER_ROLE_NAME | REVIEWER_ROLE_NAME));
+    let blocking_retry = if blocking_role {
+        session
+            .services
+            .agent_control
+            .begin_blocking_agent_start(session.thread_id)
+            .map_err(FunctionCallError::RespondToModel)?
+    } else {
+        false
+    };
+    let spawn_result = Box::pin(
         session
             .services
             .agent_control
@@ -157,11 +168,21 @@ async fn handle_spawn_agent(
                     root_turn_id: turn.turn_metadata_state.root_turn_id(),
                     environments: Some(step_context.environments.to_selections()),
                     multi_agent_v2_usage_hints,
+                    blocking_parent_thread_id: blocking_role.then_some(session.thread_id),
                 },
             ),
     )
-    .await
-    .map_err(collab_spawn_error)?;
+    .await;
+    let spawned_agent = match spawn_result {
+        Ok(agent) => agent,
+        Err(err) => {
+            session
+                .services
+                .agent_control
+                .cancel_blocking_agent_start(session.thread_id, blocking_retry);
+            return Err(collab_spawn_error(err));
+        }
+    };
     let new_thread_id = spawned_agent.thread_id;
     let agent_snapshot = session
         .services
@@ -222,7 +243,10 @@ struct SpawnAgentArgs {
 }
 
 impl SpawnAgentArgs {
-    fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
+    fn fork_mode(
+        &self,
+        role_name: Option<&str>,
+    ) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
         if self.fork_context.is_some() {
             return Err(FunctionCallError::RespondToModel(
                 "fork_context is not supported in MultiAgentV2; use fork_turns instead".to_string(),
@@ -233,8 +257,19 @@ impl SpawnAgentArgs {
             .fork_turns
             .as_deref()
             .map(str::trim)
-            .filter(|fork_turns| !fork_turns.is_empty())
-            .unwrap_or("all");
+            .filter(|fork_turns| !fork_turns.is_empty());
+
+        if role_name == Some(EXPLORER_ROLE_NAME) {
+            if fork_turns.is_none_or(|fork_turns| fork_turns.eq_ignore_ascii_case("none")) {
+                return Ok(None);
+            }
+            return Err(FunctionCallError::RespondToModel(
+                "explorer agents require fresh context; omit fork_turns or set it to `none`"
+                    .to_string(),
+            ));
+        }
+
+        let fork_turns = fork_turns.unwrap_or("all");
 
         if fork_turns.eq_ignore_ascii_case("none") {
             return Ok(None);

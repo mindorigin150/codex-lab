@@ -12,10 +12,13 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
+const SERVER_OVERLOADED_MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
+const SERVER_OVERLOADED_BACKOFF_CAP_ATTEMPT: u64 = 7;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -25,6 +28,7 @@ pub(crate) enum ResponsesStreamRequest {
 
 pub(crate) struct ResponsesStreamRetryState {
     retries: u64,
+    overload_retries: u64,
     connection_retries: u64,
     connection_retry_delay: Duration,
 }
@@ -33,10 +37,16 @@ impl Default for ResponsesStreamRetryState {
     fn default() -> Self {
         Self {
             retries: 0,
+            overload_retries: 0,
             connection_retries: 0,
             connection_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
         }
     }
+}
+
+pub(crate) fn server_overloaded_retry_delay(retry_count: u64) -> Duration {
+    backoff(retry_count.min(SERVER_OVERLOADED_BACKOFF_CAP_ATTEMPT))
+        .min(SERVER_OVERLOADED_MAX_RETRY_DELAY)
 }
 
 /// Handles a retryable stream error and returns `Ok(())` when the caller should
@@ -49,7 +59,12 @@ pub(crate) async fn handle_retryable_response_stream_error(
     sess: &Session,
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
+    cancellation_token: Option<&CancellationToken>,
 ) -> Result<(), CodexErr> {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CodexErr::TurnAborted);
+    }
+
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
@@ -71,14 +86,38 @@ pub(crate) async fn handle_retryable_response_stream_error(
             ?retry_delay,
             "stream connection failed; waiting to retry"
         );
-        sess.notify_stream_error(turn_context, "Reconnecting... waiting for network", err)
-            .await;
+        notify_retry(
+            sess,
+            turn_context,
+            "Reconnecting... waiting for network".to_string(),
+            err,
+            cancellation_token,
+        )
+        .await?;
         retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
         codex_client::record_retry!(retry_state.connection_retries, retry_delay, operation);
-        tokio::time::sleep(retry_delay).await;
+        wait_for_retry_delay(retry_delay, cancellation_token).await?;
         retry_state.connection_retry_delay = retry_delay
             .saturating_mul(2)
             .min(MAX_CONNECTION_RETRY_DELAY);
+        return Ok(());
+    }
+
+    if matches!(err.details(), CodexErrorDetails::ServerOverloaded) {
+        retry_state.overload_retries += 1;
+        let retry_count = retry_state.overload_retries;
+        let delay = server_overloaded_retry_delay(retry_count);
+        log_retry(request, turn_context, &err, retry_count, max_retries, delay);
+        notify_retry(
+            sess,
+            turn_context,
+            format!("Reconnecting... overload attempt {retry_count}"),
+            err,
+            cancellation_token,
+        )
+        .await?;
+        codex_client::record_retry!(retry_count, delay, operation);
+        wait_for_retry_delay(delay, cancellation_token).await?;
         return Ok(());
     }
 
@@ -88,13 +127,13 @@ pub(crate) async fn handle_retryable_response_stream_error(
             &turn_context.model_info,
         )
     {
-        sess.send_event(
+        let send_warning = sess.send_event(
             turn_context,
             EventMsg::Warning(WarningEvent {
                 message: format!("Falling back from WebSockets to HTTPS transport. {err:#}"),
             }),
-        )
-        .await;
+        );
+        await_with_cancellation(send_warning, cancellation_token).await?;
         retry_state.retries = 0;
         return Ok(());
     }
@@ -113,19 +152,70 @@ pub(crate) async fn handle_retryable_response_stream_error(
         if report_error {
             // Surface retry information to any UI/front-end so the user understands what is
             // happening instead of staring at a seemingly frozen screen.
-            sess.notify_stream_error(
+            notify_retry(
+                sess,
                 turn_context,
                 format!("Reconnecting... {retry_count}/{max_retries}"),
                 err,
+                cancellation_token,
             )
-            .await;
+            .await?;
         }
         codex_client::record_retry!(retry_count, delay, operation);
-        tokio::time::sleep(delay).await;
+        wait_for_retry_delay(delay, cancellation_token).await?;
         return Ok(());
     }
 
     Err(err)
+}
+
+async fn notify_retry(
+    sess: &Session,
+    turn_context: &TurnContext,
+    message: String,
+    err: CodexErr,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<(), CodexErr> {
+    await_with_cancellation(
+        sess.notify_stream_error(turn_context, message, err),
+        cancellation_token,
+    )
+    .await
+}
+
+async fn await_with_cancellation<F>(
+    future: F,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<(), CodexErr>
+where
+    F: std::future::Future<Output = ()>,
+{
+    if let Some(cancellation_token) = cancellation_token {
+        tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => Err(CodexErr::TurnAborted),
+            _ = future => Ok(()),
+        }
+    } else {
+        future.await;
+        Ok(())
+    }
+}
+
+async fn wait_for_retry_delay(
+    delay: Duration,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<(), CodexErr> {
+    if let Some(cancellation_token) = cancellation_token {
+        tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => Err(CodexErr::TurnAborted),
+            _ = tokio::time::sleep(delay) => Ok(()),
+        }
+    } else {
+        tokio::time::sleep(delay).await;
+        Ok(())
+    }
 }
 
 fn log_retry(
@@ -138,22 +228,42 @@ fn log_retry(
 ) {
     match request {
         ResponsesStreamRequest::Sampling => {
-            warn!(
-                turn_id = %turn_context.sub_id,
-                retries,
-                max_retries,
-                sampling_error = %err,
-                "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
-            );
+            if matches!(err.details(), CodexErrorDetails::ServerOverloaded) {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    retries,
+                    delay = ?delay,
+                    sampling_error = %err,
+                    "model overloaded; retrying sampling request indefinitely (attempt {retries})...",
+                );
+            } else {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    retries,
+                    max_retries,
+                    sampling_error = %err,
+                    "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
+                );
+            }
         }
         ResponsesStreamRequest::RemoteCompactionV2 => {
-            warn!(
-                turn_id = %turn_context.sub_id,
-                retries,
-                max_retries,
-                compact_error = %err,
-                "remote compaction v2 stream failed; retrying request after delay"
-            );
+            if matches!(err.details(), CodexErrorDetails::ServerOverloaded) {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    retries,
+                    delay = ?delay,
+                    compact_error = %err,
+                    "model overloaded; retrying remote compaction v2 indefinitely (attempt {retries})...",
+                );
+            } else {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    retries,
+                    max_retries,
+                    compact_error = %err,
+                    "remote compaction v2 stream failed; retrying request after delay"
+                );
+            }
         }
     }
 }

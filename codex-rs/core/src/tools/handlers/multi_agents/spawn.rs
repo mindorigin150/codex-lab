@@ -5,6 +5,8 @@ use crate::agent::control::render_input_preview;
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
+use crate::agent::role::EXPLORER_ROLE_NAME;
+use crate::agent::role::REVIEWER_ROLE_NAME;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v1;
 use codex_tools::ToolSpec;
@@ -112,28 +114,31 @@ async fn handle_spawn_agent(
         args.service_tier.as_deref(),
     )
     .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
-
-    let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
-        config,
-        input_items,
-        Some(thread_spawn_source(
-            session.thread_id,
-            &turn.session_source,
-            child_depth,
-            role_name,
-            /*task_name*/ None,
-        )?),
-        SpawnAgentOptions {
-            fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
-            fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
-            parent_thread_id: Some(session.thread_id),
-            parent_turn_id: Some(turn.sub_id.clone()),
-            root_turn_id: turn.turn_metadata_state.root_turn_id(),
-            environments: Some(step_context.environments.to_selections()),
-            multi_agent_v2_usage_hints: None,
-        },
-    ))
+    let result = Box::pin(
+        session.services.agent_control.spawn_agent_with_metadata(
+            config,
+            input_items,
+            Some(thread_spawn_source(
+                session.thread_id,
+                &turn.session_source,
+                child_depth,
+                role_name,
+                /*task_name*/ None,
+            )?),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
+                parent_thread_id: Some(session.thread_id),
+                parent_turn_id: Some(turn.sub_id.clone()),
+                root_turn_id: turn.turn_metadata_state.root_turn_id(),
+                environments: Some(step_context.environments.to_selections()),
+                multi_agent_v2_usage_hints: None,
+                blocking_parent_thread_id: role_name
+                    .filter(|role| matches!(*role, EXPLORER_ROLE_NAME | REVIEWER_ROLE_NAME))
+                    .map(|_| session.thread_id),
+            },
+        ),
+    )
     .await
     .map_err(collab_spawn_error);
     let (new_thread_id, new_agent_metadata, status) = match &result {

@@ -1,7 +1,6 @@
 use super::residency::is_v2_resident_session_source;
 use super::*;
 use crate::agent::role::apply_role_to_config;
-use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
 use crate::context::MultiAgentModeInstructions;
@@ -137,6 +136,37 @@ async fn load_agent_model_context(
 }
 
 impl AgentControl {
+    /// Close persisted V2 descendants before a cold root resume so archived child runtimes are not
+    /// presented as live agents in the new process.
+    pub(crate) async fn close_v2_descendant_edges(&self, root_thread_id: ThreadId) {
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        let Some(agent_graph_store) = state.agent_graph_store() else {
+            return;
+        };
+        let Ok(descendant_ids) = agent_graph_store
+            .list_thread_spawn_descendants(
+                root_thread_id,
+                Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
+            )
+            .await
+        else {
+            return;
+        };
+        for thread_id in descendant_ids {
+            if let Err(err) = agent_graph_store
+                .set_thread_spawn_edge_status(
+                    thread_id,
+                    codex_agent_graph_store::ThreadSpawnEdgeStatus::Closed,
+                )
+                .await
+            {
+                warn!("failed to close stale V2 child edge {thread_id}: {err}");
+            }
+        }
+    }
+
     /// Restore persisted V2 agent identities without reopening their runtimes.
     pub(crate) async fn restore_v2_agent_metadata(
         &self,
@@ -301,40 +331,9 @@ impl AgentControl {
             .get_resumed_session_sources()
             .unwrap_or((stored_source, None));
         if let Some(role_name) = session_source.get_agent_role() {
-            let runtime_approval_policy = config.permissions.approval_policy.value();
-            let runtime_approvals_reviewer = config.approvals_reviewer;
-            let runtime_cwd = config.cwd.clone();
-            let runtime_permission_profile = match config.permissions.active_permission_profile() {
-                Some(active_permission_profile) => {
-                    PermissionProfileSnapshot::active_with_profile_workspace_roots(
-                        config.permissions.permission_profile().clone(),
-                        active_permission_profile,
-                        config.permissions.profile_workspace_roots().to_vec(),
-                    )
-                }
-                None => PermissionProfileSnapshot::legacy(
-                    config.permissions.permission_profile().clone(),
-                ),
-            };
-
             apply_role_to_config(&mut config, Some(&role_name))
                 .await
                 .map_err(CodexErr::InvalidRequest)?;
-            config
-                .permissions
-                .approval_policy
-                .set(runtime_approval_policy)
-                .map_err(|err| {
-                    CodexErr::InvalidRequest(format!("approval_policy is invalid: {err}"))
-                })?;
-            config.approvals_reviewer = runtime_approvals_reviewer;
-            config.cwd = runtime_cwd;
-            config
-                .permissions
-                .set_permission_profile_from_session_snapshot(runtime_permission_profile)
-                .map_err(|err| {
-                    CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
-                })?;
         }
         if let Some(model) = stored_model {
             config.model = Some(model);
@@ -559,18 +558,22 @@ impl AgentControl {
         )
         .await;
 
-        match initial_input {
-            SpawnInitialInput::UserInput(input) => {
-                self.send_input(
+        let blocking_parent_thread_id = options.blocking_parent_thread_id;
+        if let Some(parent_thread_id) = blocking_parent_thread_id {
+            self.register_blocking_agent(parent_thread_id, new_thread.thread_id);
+        }
+        let initial_input_result = match initial_input {
+            SpawnInitialInput::UserInput(input) => self
+                .send_input(
                     new_thread.thread_id,
                     input,
                     options.parent_turn_id,
                     options.root_turn_id,
                 )
-                .await?;
-            }
-            SpawnInitialInput::InterAgentCommunication(communication, context) => {
-                self.send_inter_agent_communication_after_capacity_check(
+                .await
+                .map(|_| None),
+            SpawnInitialInput::InterAgentCommunication(communication, context) => self
+                .send_inter_agent_communication_after_capacity_check_with_receipt(
                     new_thread.thread_id,
                     &state,
                     communication,
@@ -578,7 +581,16 @@ impl AgentControl {
                     options.parent_turn_id,
                     options.root_turn_id,
                 )
-                .await?;
+                .await
+                .map(|(_, generation)| generation),
+        };
+        match initial_input_result {
+            Ok(_) => {}
+            Err(err) => {
+                if let Some(parent_thread_id) = blocking_parent_thread_id {
+                    self.cleanup_rolled_back_agent(parent_thread_id, new_thread.thread_id, None);
+                }
+                return Err(err);
             }
         }
         if multi_agent_version != MultiAgentVersion::V2 {

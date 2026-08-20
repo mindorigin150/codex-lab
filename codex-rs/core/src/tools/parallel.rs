@@ -17,6 +17,9 @@ use tracing::trace_span;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::tools::blocking_spawn_gate::BlockingSpawnGate;
+use crate::tools::blocking_spawn_gate::is_blocking_spawn;
+use crate::tools::blocking_spawn_gate::is_collaboration_call;
 use crate::tools::context::AbortedToolOutput;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolPayload;
@@ -44,6 +47,7 @@ pub(crate) struct ToolCallRuntime {
     step_context: Arc<StepContext>,
     tracker: SharedTurnDiffTracker,
     parallel_execution: Arc<RwLock<()>>,
+    blocking_spawn_gate: Arc<BlockingSpawnGate>,
 }
 
 impl ToolCallRuntime {
@@ -57,6 +61,7 @@ impl ToolCallRuntime {
             step_context,
             tracker,
             parallel_execution: Arc::new(RwLock::new(())),
+            blocking_spawn_gate: Arc::new(BlockingSpawnGate::default()),
         }
     }
 
@@ -132,6 +137,16 @@ impl ToolCallRuntime {
         let terminal_outcome_reached = Arc::new(AtomicBool::new(false));
         let dispatch_terminal_outcome_reached = Arc::clone(&terminal_outcome_reached);
         let dispatch_call = call.clone();
+        let collaboration_namespace = step_context
+            .turn
+            .config
+            .multi_agent_v2
+            .tool_namespace
+            .as_deref();
+        let collaboration_call = is_collaboration_call(&call, collaboration_namespace);
+        let mut blocking_spawn_registration = is_blocking_spawn(&call, collaboration_namespace)
+            .then(|| self.blocking_spawn_gate.register());
+        let blocking_spawn_gate = Arc::clone(&self.blocking_spawn_gate);
 
         let dispatch_span = trace_span!(
             "dispatch_tool_call_with_code_mode_result",
@@ -161,18 +176,31 @@ impl ToolCallRuntime {
                     let _ = execution_started_at.set(Instant::now());
                 }
 
-                router
-                    .dispatch_tool_call_with_terminal_outcome(
-                        session,
-                        step_context,
-                        invocation_cancellation_token,
-                        tracker,
-                        dispatch_call,
-                        source,
-                        dispatch_terminal_outcome_reached,
-                    )
-                    .instrument(dispatch_span.clone())
-                    .await
+                let result = if !collaboration_call
+                    && blocking_spawn_gate.successful_spawn_settled().await
+                {
+                    Err(FunctionCallError::RespondToModel(
+                        "Explorer or reviewer work is blocking local tools; wait for the blocking agents before running other tools."
+                            .to_string(),
+                    ))
+                } else {
+                    router
+                        .dispatch_tool_call_with_terminal_outcome(
+                            session,
+                            step_context,
+                            invocation_cancellation_token,
+                            tracker,
+                            dispatch_call,
+                            source,
+                            dispatch_terminal_outcome_reached,
+                        )
+                        .instrument(dispatch_span.clone())
+                        .await
+                };
+                if let Some(registration) = blocking_spawn_registration.as_mut() {
+                    registration.finish(result.is_ok());
+                }
+                result
             }));
 
         async move {

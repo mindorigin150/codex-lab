@@ -409,6 +409,106 @@ async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_explorer_defaults_to_fresh_context() {
+    #[derive(Deserialize)]
+    struct V2SpawnResult {
+        task_name: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let turn = TurnContext {
+        config: Arc::new(config),
+        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
+        ..turn
+    };
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "explore",
+                "agent_type": "explorer"
+            })),
+        ))
+        .await
+        .expect("explorer should spawn without inherited context");
+    let (content, _) = expect_text_output(output);
+    let result: V2SpawnResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.thread_id,
+            &turn.session_source,
+            result.task_name.as_str(),
+        )
+        .await
+        .expect("spawned task name should resolve");
+    let snapshot = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("spawned explorer should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(snapshot.forked_from_thread_id, None);
+    assert_eq!(snapshot.permission_profile, PermissionProfile::read_only());
+}
+
+#[tokio::test]
+async fn multi_agent_v2_explorer_rejects_inherited_context() {
+    let (session, turn) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    for fork_turns in ["all", "2"] {
+        let err = match SpawnAgentHandlerV2::default()
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "inspect this repo",
+                    "task_name": format!("explore-{fork_turns}"),
+                    "agent_type": "explorer",
+                    "fork_turns": fork_turns
+                })),
+            ))
+            .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("explorer context inheritance should be rejected"),
+        };
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "explorer agents require fresh context; omit fork_turns or set it to `none`"
+                    .to_string()
+            )
+        );
+    }
+}
+
+#[tokio::test]
 async fn spawn_agent_service_tier_override_validates_the_effective_child_model() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {

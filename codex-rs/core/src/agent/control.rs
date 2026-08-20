@@ -57,10 +57,14 @@ use tokio::sync::watch;
 use tracing::warn;
 use uuid::Uuid;
 
+use self::barrier::BlockingBarriers;
+pub(crate) use self::barrier::CompletionDeliveryClaim;
+use self::barrier::CompletionReceipts;
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
 
+mod barrier;
 mod execution;
 mod legacy;
 mod residency;
@@ -81,6 +85,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) root_turn_id: Option<String>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
+    pub(crate) blocking_parent_thread_id: Option<ThreadId>,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +123,8 @@ pub(crate) struct AgentControl {
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
+    completion_receipts: Arc<CompletionReceipts>,
+    blocking_barriers: Arc<BlockingBarriers>,
 }
 
 impl Default for AgentControl {
@@ -145,6 +152,8 @@ impl AgentControl {
             v2_residency: Arc::default(),
             agent_execution_limiter: Arc::default(),
             rollout_budget: Arc::default(),
+            completion_receipts: Arc::default(),
+            blocking_barriers: Arc::default(),
         };
         if let Some(rollout_budget) = rollout_budget {
             control.rollout_budget.configure(rollout_budget);
@@ -180,6 +189,7 @@ impl AgentControl {
     ) -> CodexResult<String> {
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
+        let generation = self.reserve_agent_generation(agent_id);
         let result = match thread
             .start_or_steer_turn(
                 TurnInputRequest::user_input(input).on_start(TurnStartOptions {
@@ -203,6 +213,9 @@ impl AgentControl {
             )),
             Err(err) => Err(err),
         };
+        if result.is_err() {
+            self.cancel_agent_generation(agent_id, generation);
+        }
         self.handle_thread_request_result(agent_id, &state, result)
             .await
     }
@@ -215,13 +228,32 @@ impl AgentControl {
         parent_turn_id: Option<String>,
         root_turn_id: Option<String>,
     ) -> CodexResult<String> {
+        self.send_inter_agent_communication_with_receipt(
+            agent_id,
+            communication,
+            agent_communication_context,
+            parent_turn_id,
+            root_turn_id,
+        )
+        .await
+        .map(|(output, _)| output)
+    }
+
+    pub(crate) async fn send_inter_agent_communication_with_receipt(
+        &self,
+        agent_id: ThreadId,
+        communication: InterAgentCommunication,
+        agent_communication_context: AgentCommunicationContext,
+        parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
+    ) -> CodexResult<(String, Option<u64>)> {
         let state = self.upgrade()?;
         if communication.trigger_turn {
             let thread = state.get_thread(agent_id).await?;
             self.ensure_execution_capacity_for_turn_start(&thread)
                 .await?;
         }
-        self.send_inter_agent_communication_after_capacity_check(
+        self.send_inter_agent_communication_after_capacity_check_with_receipt(
             agent_id,
             &state,
             communication,
@@ -232,7 +264,7 @@ impl AgentControl {
         .await
     }
 
-    async fn send_inter_agent_communication_after_capacity_check(
+    async fn send_inter_agent_communication_after_capacity_check_with_receipt(
         &self,
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
@@ -240,16 +272,26 @@ impl AgentControl {
         context: AgentCommunicationContext,
         parent_turn_id: Option<String>,
         root_turn_id: Option<String>,
-    ) -> CodexResult<String> {
-        self.submit_inter_agent_communication(
-            agent_id,
-            state,
-            communication,
-            context,
-            parent_turn_id,
-            root_turn_id,
-        )
-        .await
+    ) -> CodexResult<(String, Option<u64>)> {
+        let generation = communication
+            .trigger_turn
+            .then(|| self.reserve_agent_generation(agent_id));
+        let result = self
+            .submit_inter_agent_communication(
+                agent_id,
+                state,
+                communication,
+                context,
+                parent_turn_id,
+                root_turn_id,
+            )
+            .await;
+        if result.is_err()
+            && let Some(generation) = generation
+        {
+            self.cancel_agent_generation(agent_id, generation);
+        }
+        result.map(|output| (output, generation))
     }
 
     async fn submit_inter_agent_communication(

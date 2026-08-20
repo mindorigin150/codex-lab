@@ -12,6 +12,7 @@ use crate::hook_runtime::run_pre_compact_hooks;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
+use crate::responses_retry::server_overloaded_retry_delay;
 #[cfg(test)]
 use crate::session::PreviousTurnSettings;
 use crate::session::session::Session;
@@ -257,6 +258,7 @@ async fn run_compact_task_inner_impl(
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
+    let mut overload_retries = 0;
     let mut client_session = sess.services.model_client.new_session();
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
@@ -323,15 +325,28 @@ async fn run_compact_task_inner_impl(
                 return Err(e);
             }
             Err(e) => {
-                if retries < max_retries {
-                    retries += 1;
-                    let delay = backoff(retries);
-                    sess.notify_stream_error(
-                        turn_context.as_ref(),
-                        format!("Reconnecting... {retries}/{max_retries}"),
-                        e,
-                    )
-                    .await;
+                let is_server_overloaded =
+                    matches!(e.details(), CodexErrorDetails::ServerOverloaded);
+                if is_server_overloaded || retries < max_retries {
+                    let retry_count = if is_server_overloaded {
+                        overload_retries += 1;
+                        overload_retries
+                    } else {
+                        retries += 1;
+                        retries
+                    };
+                    let delay = if is_server_overloaded {
+                        server_overloaded_retry_delay(retry_count)
+                    } else {
+                        backoff(retry_count)
+                    };
+                    let message = if is_server_overloaded {
+                        format!("Reconnecting... overload attempt {retry_count}")
+                    } else {
+                        format!("Reconnecting... {retry_count}/{max_retries}")
+                    };
+                    sess.notify_stream_error(turn_context.as_ref(), message, e)
+                        .await;
                     tokio::time::sleep(delay).await;
                     continue;
                 } else {

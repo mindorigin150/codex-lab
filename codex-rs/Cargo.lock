@@ -2462,6 +2462,7 @@ dependencies = [
  "futures",
  "http 1.4.0",
  "rand 0.9.3",
+ "serde_json",
  "tokio",
  "tracing",
 ]
