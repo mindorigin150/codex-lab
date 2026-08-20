@@ -53,7 +53,29 @@ jobs:
         if: runner.os == 'Linux'
         env:
           TARGET: ${{ matrix.target }}
-        run: bash .github/scripts/install-musl-build-tools.sh
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if bash .github/scripts/install-musl-build-tools.sh; then
+              exit 0
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+
+      - name: Disable aws-lc jitter entropy for musl
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
 
       - name: Configure Windows MSVC
         if: runner.os == 'Windows'
