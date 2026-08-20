@@ -27,6 +27,9 @@ Codex Lab tracks upstream Codex while preserving a small set of fork-specific gu
   rebuilds terminal placement across resize, pager, backtrack, and scrollback changes.
 - **Isolated installation.** The versioned `codex-lab` launcher coexists with stock `codex`, uses a
   separate configuration home, and can bundle Bubblewrap on Linux without requiring `sudo`.
+- **Recoverable model overloads.** `server_is_overloaded` and `slow_down` responses no longer
+  interrupt an active task. Codex Lab keeps the same turn alive, shows a reconnecting status, and
+  retries indefinitely with capped backoff until the model responds or the user cancels.
 
 ### Context, compaction, and memory
 

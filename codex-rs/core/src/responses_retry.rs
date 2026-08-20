@@ -7,6 +7,7 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::util::backoff;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
 use tokio_util::sync::CancellationToken;
@@ -18,11 +19,20 @@ pub(crate) enum ResponsesStreamRequest {
     RemoteCompactionV2,
 }
 
+const SERVER_OVERLOADED_MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
+const SERVER_OVERLOADED_BACKOFF_CAP_ATTEMPT: u64 = 7;
+
+pub(crate) fn server_overloaded_retry_delay(retry_count: u64) -> Duration {
+    backoff(retry_count.min(SERVER_OVERLOADED_BACKOFF_CAP_ATTEMPT))
+        .min(SERVER_OVERLOADED_MAX_RETRY_DELAY)
+}
+
 /// Handles a retryable stream error and returns `Ok(())` when the caller should
 /// retry the request loop.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_retryable_response_stream_error(
     retries: &mut u64,
+    overload_retries: &mut u64,
     max_retries: u64,
     err: CodexErr,
     client_session: &mut ModelClientSession,
@@ -33,6 +43,31 @@ pub(crate) async fn handle_retryable_response_stream_error(
 ) -> Result<(), CodexErr> {
     if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CodexErr::TurnAborted);
+    }
+
+    let is_server_overloaded = matches!(err.details(), CodexErrorDetails::ServerOverloaded);
+    if is_server_overloaded {
+        *overload_retries += 1;
+        let retry_count = *overload_retries;
+        let delay = server_overloaded_retry_delay(retry_count);
+        log_retry(request, turn_context, &err, retry_count, max_retries, delay);
+
+        let notify = sess.notify_stream_error(
+            turn_context,
+            format!("Reconnecting... overload attempt {retry_count}"),
+            err,
+        );
+        if let Some(cancellation_token) = cancellation_token {
+            tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+                _ = notify => {}
+            }
+        } else {
+            notify.await;
+        }
+        wait_for_retry_delay(delay, cancellation_token).await?;
+        return Ok(());
     }
 
     if *retries >= max_retries
@@ -122,22 +157,42 @@ fn log_retry(
 ) {
     match request {
         ResponsesStreamRequest::Sampling => {
-            warn!(
-                turn_id = %turn_context.sub_id,
-                retries,
-                max_retries,
-                sampling_error = %err,
-                "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
-            );
+            if matches!(err.details(), CodexErrorDetails::ServerOverloaded) {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    retries,
+                    delay = ?delay,
+                    sampling_error = %err,
+                    "model overloaded; retrying sampling request indefinitely (attempt {retries})...",
+                );
+            } else {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    retries,
+                    max_retries,
+                    sampling_error = %err,
+                    "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
+                );
+            }
         }
         ResponsesStreamRequest::RemoteCompactionV2 => {
-            warn!(
-                turn_id = %turn_context.sub_id,
-                retries,
-                max_retries,
-                compact_error = %err,
-                "remote compaction v2 stream failed; retrying request after delay"
-            );
+            if matches!(err.details(), CodexErrorDetails::ServerOverloaded) {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    retries,
+                    delay = ?delay,
+                    compact_error = %err,
+                    "model overloaded; retrying remote compaction v2 indefinitely (attempt {retries})...",
+                );
+            } else {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    retries,
+                    max_retries,
+                    compact_error = %err,
+                    "remote compaction v2 stream failed; retrying request after delay"
+                );
+            }
         }
     }
 }

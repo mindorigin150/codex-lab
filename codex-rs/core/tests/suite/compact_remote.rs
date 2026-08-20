@@ -1063,7 +1063,7 @@ async fn remote_compact_v2_retries_failures_with_stream_retry_budget() -> Result
             .with_config(|config| {
                 let _ = config.features.enable(Feature::RemoteCompactionV2);
                 config.model_provider.request_max_retries = Some(0);
-                config.model_provider.stream_max_retries = Some(2);
+                config.model_provider.stream_max_retries = Some(1);
             }),
     )
     .await?;
@@ -1077,13 +1077,11 @@ async fn remote_compact_v2_retries_failures_with_stream_retry_budget() -> Result
                 responses::ev_completed("resp-1"),
             ])),
             ResponseTemplate::new(500).set_body_string("first compact open failed"),
-            responses::sse_response(responses::sse(vec![serde_json::json!({
-                "type": "response.output_item.done",
-                "item": {
-                    "type": "compaction",
-                    "encrypted_content": "FAILED_COMPACT_SUMMARY",
-                }
-            })])),
+            responses::sse_response(responses::sse_failed(
+                "resp-overloaded",
+                "server_is_overloaded",
+                "Selected model is at capacity",
+            )),
             responses::sse_response(responses::sse(vec![
                 serde_json::json!({
                     "type": "response.output_item.done",

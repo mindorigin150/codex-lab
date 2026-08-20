@@ -1217,6 +1217,7 @@ async fn run_sampling_request(
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
+    let mut overload_retries = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
     loop {
@@ -1275,6 +1276,7 @@ async fn run_sampling_request(
 
         handle_retryable_response_stream_error(
             &mut retries,
+            &mut overload_retries,
             max_retries,
             err,
             client_session,

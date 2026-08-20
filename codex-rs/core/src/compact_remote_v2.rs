@@ -340,6 +340,7 @@ async fn run_remote_compaction_request_v2(
         .stream_max_retries()
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retries = 0;
+    let mut overload_retries = 0;
     loop {
         let result = match client_session
             .stream(
@@ -364,6 +365,7 @@ async fn run_remote_compaction_request_v2(
             Err(err) => {
                 handle_retryable_response_stream_error(
                     &mut retries,
+                    &mut overload_retries,
                     max_retries,
                     err,
                     client_session,

@@ -377,7 +377,6 @@ impl CodexErr {
             | CodexErrorDetails::Spawn
             | CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::UsageLimitReached(_)
-            | CodexErrorDetails::ServerOverloaded
             | CodexErrorDetails::CyberPolicy { .. } => false,
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::Timeout
@@ -389,7 +388,8 @@ impl CodexErr {
             | CodexErrorDetails::InternalAgentDied
             | CodexErrorDetails::Io(_)
             | CodexErrorDetails::Json(_)
-            | CodexErrorDetails::TokioJoin(_) => true,
+            | CodexErrorDetails::TokioJoin(_)
+            | CodexErrorDetails::ServerOverloaded => true,
             #[cfg(target_os = "linux")]
             CodexErrorDetails::LandlockRuleset(_) | CodexErrorDetails::LandlockPathFd(_) => false,
         }

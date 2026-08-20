@@ -1,5 +1,6 @@
 use super::ResponsesStreamRequest;
 use super::log_retry;
+use super::server_overloaded_retry_delay;
 use super::wait_for_retry_delay;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::error::CodexErr;
@@ -7,6 +8,15 @@ use codex_protocol::error::CodexErrorDetails;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing_test::internal::MockWriter;
+
+#[test]
+fn server_overloaded_retry_delay_is_capped() {
+    assert!(server_overloaded_retry_delay(1) < Duration::from_secs(1));
+    assert_eq!(
+        server_overloaded_retry_delay(u64::MAX),
+        Duration::from_secs(10)
+    );
+}
 
 #[tokio::test]
 async fn retry_delay_returns_turn_aborted_when_cancelled() {
