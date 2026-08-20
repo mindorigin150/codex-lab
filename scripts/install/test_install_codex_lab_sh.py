@@ -22,14 +22,14 @@ class InstallCodexLabShTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
-                (root / ".codex-lab" / "config.toml").read_text(),
-                '[features.multi_agent_v2]\ntool_namespace = "agents"\n',
+                (root / ".codex" / "config.toml").read_text(),
+                '[features.multi_agent_v2]\nenabled = true\ntool_namespace = "agents"\n',
             )
             self.assertEqual(
-                (root / ".codex-lab" / "config.toml").stat().st_mode & 0o777,
+                (root / ".codex" / "config.toml").stat().st_mode & 0o777,
                 0o600,
             )
-            self.assertEqual(list((root / ".codex-lab").glob(".config.toml.*")), [])
+            self.assertEqual(list((root / ".codex").glob(".config.toml.*")), [])
 
     def test_preserves_existing_multi_agent_table_without_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -84,10 +84,9 @@ class InstallCodexLabShTest(unittest.TestCase):
     def test_refuses_to_write_through_dangling_config_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            lab_home = root / ".codex-lab"
             shared_config = root / ".codex" / "config.toml"
-            lab_home.mkdir(parents=True)
-            (lab_home / "config.toml").symlink_to(shared_config)
+            shared_config.parent.mkdir(parents=True)
+            shared_config.symlink_to(root / "missing-config.toml")
 
             result = run_installer(root, write_fake_codex(root))
 
@@ -104,7 +103,6 @@ class InstallCodexLabShTest(unittest.TestCase):
             result = run_installer(root, fake_binary)
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            lab_home = root / ".codex-lab"
             shared_home = root / ".codex"
             install_root = root / ".local" / "lib" / "codex-lab"
             launcher = root / ".local" / "bin" / "codex-lab"
@@ -126,13 +124,8 @@ class InstallCodexLabShTest(unittest.TestCase):
                 "export CODEX_PREFER_BUNDLED_BWRAP=1",
                 launcher.read_text(),
             )
-            self.assertEqual(
-                os.readlink(lab_home / "sessions"), str(shared_home / "sessions")
-            )
-            self.assertEqual(
-                os.readlink(lab_home / "archived_sessions"),
-                str(shared_home / "archived_sessions"),
-            )
+            self.assertTrue((shared_home / "sessions").is_dir())
+            self.assertTrue((shared_home / "archived_sessions").is_dir())
 
             launched = subprocess.run(
                 [launcher, "--version"],
@@ -144,7 +137,38 @@ class InstallCodexLabShTest(unittest.TestCase):
             self.assertEqual(launched.returncode, 0, launched.stderr)
             self.assertEqual(
                 launched.stdout.strip(),
-                f"{lab_home}|{shared_home}|--version",
+                f"{shared_home}|{shared_home}|--version",
+            )
+
+    def test_explicit_lab_home_keeps_isolated_config_with_shared_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_binary = write_fake_codex(root)
+
+            result = run_installer(
+                root,
+                fake_binary,
+                extra_env={"CODEX_LAB_HOME": str(root / ".codex-lab")},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((root / ".codex-lab" / "config.toml").is_file())
+            self.assertEqual(
+                os.readlink(root / ".codex-lab" / "sessions"),
+                str(root / ".codex" / "sessions"),
+            )
+            launcher = root / ".local" / "bin" / "codex-lab"
+            launched = subprocess.run(
+                [launcher, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HOME": str(root)},
+            )
+            self.assertEqual(launched.returncode, 0, launched.stderr)
+            self.assertEqual(
+                launched.stdout.strip(),
+                f"{root / '.codex-lab'}|{root / '.codex'}|--version",
             )
 
     def test_reinstall_is_idempotent(self) -> None:
@@ -159,7 +183,7 @@ class InstallCodexLabShTest(unittest.TestCase):
             self.assertEqual(second.returncode, 0, second.stderr)
             backups = list((root / ".local" / "bin").glob("codex-lab.bak-*"))
             self.assertEqual(backups, [])
-            config = root / ".codex-lab" / "config.toml"
+            config = root / ".codex" / "config.toml"
             self.assertEqual(config.read_text().count("tool_namespace"), 1)
             self.assertEqual(list(config.parent.glob("config.toml.bak-*")), [])
 
@@ -171,7 +195,11 @@ class InstallCodexLabShTest(unittest.TestCase):
             sessions.mkdir(parents=True)
             (sessions / "rollout.jsonl").write_text("existing conversation")
 
-            result = run_installer(root, fake_binary)
+            result = run_installer(
+                root,
+                fake_binary,
+                extra_env={"CODEX_LAB_HOME": str(root / ".codex-lab")},
+            )
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("already contains data", result.stderr)
@@ -390,8 +418,8 @@ def release_dir(root: Path) -> Path:
     return root / ".local" / "lib" / "codex-lab" / "releases" / "test-release"
 
 
-def write_config(root: Path, contents: str) -> Path:
-    config = root / ".codex-lab" / "config.toml"
+def write_config(root: Path, contents: str, *, lab: bool = False) -> Path:
+    config = root / (".codex-lab" if lab else ".codex") / "config.toml"
     config.parent.mkdir(parents=True)
     config.write_text(contents)
     return config

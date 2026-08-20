@@ -6,8 +6,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 CODEX_RS_DIR="$REPO_ROOT/codex-rs"
 
-LAB_HOME="${CODEX_LAB_HOME:-$HOME/.codex-lab}"
 SHARED_STATE_HOME="${CODEX_SHARED_STATE_HOME:-$HOME/.codex}"
+LAB_HOME="${CODEX_LAB_HOME:-$SHARED_STATE_HOME}"
 INSTALL_ROOT="${CODEX_LAB_INSTALL_ROOT:-$HOME/.local/lib/codex-lab}"
 BIN_DIR="${CODEX_LAB_BIN_DIR:-$HOME/.local/bin}"
 SOURCE_BINARY="${CODEX_LAB_BINARY:-}"
@@ -30,9 +30,10 @@ Usage: install-codex-lab.sh [OPTIONS]
 
 Build and install the current checkout as `codex-lab`.
 
-The lab configuration remains isolated under ~/.codex-lab. Conversation
-rollouts and SQLite-backed state are shared with the official Codex home under
-~/.codex, so `codex resume` and `codex-lab resume` see the same history.
+By default Codex Lab uses the official ~/.codex home, so configuration,
+authentication, conversation history, rollouts, and SQLite-backed state are
+shared with `codex`. Set CODEX_LAB_HOME explicitly to keep a separate config
+home while retaining the shared state home.
 
 Options:
   --binary PATH       Install a matching Codex Lab binary instead of building.
@@ -43,7 +44,7 @@ Options:
   -h, --help          Show this help.
 
 Environment:
-  CODEX_LAB_HOME          Lab config home (default: ~/.codex-lab).
+  CODEX_LAB_HOME          Optional isolated lab config home (default: ~/.codex).
   CODEX_SHARED_STATE_HOME Shared official Codex home (default: ~/.codex).
   CODEX_LAB_INSTALL_ROOT  Versioned install root.
   CODEX_LAB_BIN_DIR       Directory for the codex-lab launcher.
@@ -255,6 +256,11 @@ ensure_shared_rollout_dir() {
   shared_dir="$SHARED_STATE_HOME/$name"
   lab_path="$LAB_HOME/$name"
 
+  if [ "$lab_path" = "$shared_dir" ]; then
+    mkdir -p "$shared_dir"
+    return
+  fi
+
   check_shared_rollout_dir "$name"
   mkdir -p "$shared_dir"
   if [ -L "$lab_path" ]; then
@@ -281,6 +287,23 @@ ensure_multi_agent_namespace() {
       echo "$config exists but is not a regular file." >&2
       exit 1
     fi
+    if grep -Eq '(^|[^A-Za-z0-9_])multi_agent_v2([^A-Za-z0-9_]|$)' "$config"; then
+      return
+    fi
+
+    if ! (umask 077 && set -C && : >"$CONFIG_TMP") 2>/dev/null; then
+      echo "Could not create temporary config: $CONFIG_TMP" >&2
+      exit 1
+    fi
+    cat "$config" >"$CONFIG_TMP"
+    cat >>"$CONFIG_TMP" <<'EOF'
+
+[features.multi_agent_v2]
+enabled = true
+tool_namespace = "agents"
+EOF
+    chmod 0600 "$CONFIG_TMP"
+    mv -f "$CONFIG_TMP" "$config"
     return
   fi
 
@@ -290,6 +313,7 @@ ensure_multi_agent_namespace() {
   fi
   cat >"$CONFIG_TMP" <<'EOF'
 [features.multi_agent_v2]
+enabled = true
 tool_namespace = "agents"
 EOF
   chmod 0600 "$CONFIG_TMP"
@@ -358,8 +382,6 @@ warn_if_linux_sandbox_unavailable() {
 }
 
 parse_args "$@"
-check_shared_rollout_dir sessions
-check_shared_rollout_dir archived_sessions
 resolve_bwrap_source
 
 if [ -n "$SOURCE_BWRAP" ]; then
@@ -470,7 +492,7 @@ fi
 
 replace_path_with_symlink "$CURRENT_LINK" "releases/$RELEASE_ID" "$INSTALL_ROOT/.current.$$"
 
-step "Configuring isolated lab config with shared conversation history"
+step "Configuring shared Codex home"
 ensure_shared_rollout_dir sessions
 ensure_shared_rollout_dir archived_sessions
 install_launcher

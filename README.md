@@ -25,8 +25,9 @@ Codex Lab tracks upstream Codex while preserving a small set of fork-specific gu
   instead of being copied into model context, with bounded previews and explicit result metadata.
 - **Terminal LaTeX images.** The TUI renders math through MathJax as transparent PNG images and
   rebuilds terminal placement across resize, pager, backtrack, and scrollback changes.
-- **Isolated installation.** The versioned `codex-lab` launcher coexists with stock `codex`, uses a
-  separate configuration home, and can bundle Bubblewrap on Linux without requiring `sudo`.
+- **Coexisting installation.** The versioned `codex-lab` launcher coexists with stock `codex` while
+  using the same configuration, authentication, conversation history, rollout files, and SQLite
+  state by default. It can bundle Bubblewrap on Linux without requiring `sudo`.
 - **Recoverable model overloads.** `server_is_overloaded` and `slow_down` responses no longer
   interrupt an active task. Codex Lab keeps the same turn alive, shows a reconnecting status, and
   retries indefinitely with capped backoff until the model responds or the user cancels.
@@ -81,11 +82,22 @@ codex-lab
 
 The installer keeps the stock `codex` command untouched. It installs versioned
 binaries under `~/.local/lib/codex-lab`, creates the
-`~/.local/bin/codex-lab` launcher, and uses an isolated `~/.codex-lab`
-configuration home. Recorded sessions and the SQLite conversation index are
-shared with the default `~/.codex` home, so `codex-lab resume --all` can find
-conversations created by either installation. Authentication and other lab
-configuration may still need to be set up separately on first use.
+`~/.local/bin/codex-lab` launcher, and uses the official `~/.codex` home by
+default. Both commands therefore read and write the same config, authentication,
+prompt history, recorded sessions, rollout files, and SQLite conversation index;
+`codex resume --all` and `codex-lab resume --all` see the same conversations.
+
+Set `CODEX_LAB_HOME=/path/to/lab-home` when an isolated configuration is
+required. In that mode the SQLite/rollout state remains shared through
+`CODEX_SHARED_STATE_HOME` (which defaults to `~/.codex`), while the lab config,
+authentication, and prompt history are kept separate.
+
+When changing an existing installation from the old isolated layout, stop both
+commands first and back up `~/.codex` and `~/.codex-lab`. Keep the same Codex
+schema version during the first shared launch: ordinary SQLite WAL reads and
+writes can coexist, but two different binaries should not perform schema or
+config migrations concurrently. Existing rollout files and history are not
+deleted by the installer.
 
 To update an existing source installation, update the checkout and rerun the
 same installer:
