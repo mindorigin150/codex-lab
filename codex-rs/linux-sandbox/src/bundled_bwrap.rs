@@ -125,6 +125,10 @@ fn expected_sha256() -> Option<[u8; 32]> {
     })
 }
 
+pub(crate) fn expected_sha256_hex() -> Option<String> {
+    expected_sha256().map(|digest| bytes_to_hex(&digest))
+}
+
 fn verify_digest(file: &File, expected: Option<[u8; 32]>, path: &Path) -> Result<(), String> {
     let Some(expected) = expected else {
         return Ok(());
