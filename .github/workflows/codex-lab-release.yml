@@ -16,7 +16,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +26,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
-            runner: macos-15-intel
+            runner: macos-15
           - target: aarch64-apple-darwin
             runner: macos-15
           - target: x86_64-pc-windows-msvc
@@ -41,7 +41,9 @@ jobs:
 
       - uses: ./.github/actions/setup-ci
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Keep this in sync with codex-rs/rust-toolchain.toml. Using `stable`
+      # installs cross targets for a different toolchain than Cargo selects.
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ matrix.target }}
 
